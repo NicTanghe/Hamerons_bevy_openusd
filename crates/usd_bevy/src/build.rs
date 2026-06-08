@@ -3548,7 +3548,8 @@ pub(crate) fn preload_material_variants(
             if set.options.len() < 2 {
                 continue;
             }
-            type Entry = (String, bevy::asset::Handle<StandardMaterial>, Option<crate::read::shade::ReadPreviewMaterial>);
+            // (option, material handle, material-for-diff, mesh point count)
+            type Entry = (String, bevy::asset::Handle<StandardMaterial>, Option<crate::read::shade::ReadPreviewMaterial>, usize);
             let mut per_mesh: HashMap<String, Vec<Entry>> = HashMap::new();
             for option in &set.options {
                 let Some(opt_stage) = open_option(prim_path, &set.name, option) else {
@@ -3566,7 +3567,8 @@ pub(crate) fn preload_material_variants(
                     };
                     let read = ushade::read_preview_material(&opt_stage, &matp).ok().flatten();
                     let handle = ctx.material_for(&opt_stage, &matp, false, &suffix);
-                    per_mesh.entry(mp.clone()).or_default().push((option.clone(), handle, read));
+                    let pts = ugeom::read_mesh(&opt_stage, &mpath).ok().flatten().map(|m| m.points.len()).unwrap_or(0);
+                    per_mesh.entry(mp.clone()).or_default().push((option.clone(), handle, read, pts));
                 }
             }
             let mut set_out = MaterialVariantSet {
@@ -3575,14 +3577,22 @@ pub(crate) fn preload_material_variants(
                 current: set.selection.clone().unwrap_or_default(),
                 per_mesh: Vec::new(),
             };
-            for (mesh, entries) in per_mesh {
-                if entries.len() < 2 {
-                    continue;
-                }
-                let differs = entries.windows(2).any(|w| w[0].2 != w[1].2);
-                if differs {
-                    let opts = entries.into_iter().map(|(o, h, _)| (o, h)).collect();
-                    set_out.per_mesh.push((mesh, opts));
+            // If any mesh's topology changes across options, this set is a
+            // geometry variant (not a pure material swap) — leave it on the
+            // heavy reload path rather than swapping stale meshes' materials.
+            let geometry_stable = per_mesh
+                .values()
+                .all(|entries| entries.windows(2).all(|w| w[0].3 == w[1].3));
+            if geometry_stable {
+                for (mesh, entries) in per_mesh {
+                    if entries.len() < 2 {
+                        continue;
+                    }
+                    let differs = entries.windows(2).any(|w| w[0].2 != w[1].2);
+                    if differs {
+                        let opts = entries.into_iter().map(|(o, h, _, _)| (o, h)).collect();
+                        set_out.per_mesh.push((mesh, opts));
+                    }
                 }
             }
             if !set_out.per_mesh.is_empty() {
