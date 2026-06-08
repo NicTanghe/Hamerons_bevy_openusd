@@ -398,7 +398,7 @@ impl AssetLoader for UsdLoader {
         };
 
         let skip_payloads = !settings.load_payloads;
-        let mut builder = openusd::Stage::builder()
+        let mut builder = openusd::usd::Stage::builder()
             .resolver(
                 openusd::ar::DefaultResolver::with_search_paths(
                     search.clone(),
@@ -675,7 +675,7 @@ impl AssetLoader for UsdLoader {
 }
 
 /// Decompose a USDZ archive. Writes the first USD layer to a tempfile (so
-/// `openusd::Stage::open` can parse it the normal way) and returns a map of
+/// `openusd::usd::Stage::open` can parse it the normal way) and returns a map of
 /// `archive-relative path -> raw bytes` for every *non-layer* entry —
 /// typically PNG / JPEG / KTX textures.
 ///
@@ -851,7 +851,7 @@ fn is_text_usd(bytes: &[u8]) -> bool {
 /// Used by the viewer's live-tuning system so sliding the radius /
 /// ring-segments / point-scale rebuilds meshes in place — no reload.
 fn collect_curves_and_points(
-    stage: &openusd::Stage,
+    stage: &openusd::usd::Stage,
 ) -> (
     HashMap<String, crate::read::geom::ReadCurves>,
     HashMap<String, crate::read::geom::ReadPoints>,
@@ -886,7 +886,7 @@ fn collect_curves_and_points(
 /// map — the runtime cost is proportional to animated-prim count, not
 /// total stage size.
 fn collect_animated_prims(
-    stage: &openusd::Stage,
+    stage: &openusd::usd::Stage,
 ) -> HashMap<String, crate::read::anim::AnimatedPrim> {
     use openusd::sdf::Path;
     let mut out = HashMap::new();
@@ -903,7 +903,7 @@ fn collect_animated_prims(
 /// readers return `None` for mismatched types so we rely on dispatch
 /// order: try each reader on each prim, record what sticks.
 fn collect_skel(
-    stage: &openusd::Stage,
+    stage: &openusd::usd::Stage,
 ) -> (
     Vec<crate::read::skel::ReadSkeleton>,
     Vec<crate::read::skel::ReadSkelRoot>,
@@ -935,7 +935,7 @@ fn collect_skel(
 /// are filtered out so only prims that actually author clip
 /// metadata show up in the map.
 fn collect_clip_sets(
-    stage: &openusd::Stage,
+    stage: &openusd::usd::Stage,
 ) -> std::collections::HashMap<String, Vec<crate::read::clips::ReadClipSet>> {
     use openusd::sdf::Path;
     let mut out = std::collections::HashMap::new();
@@ -953,7 +953,7 @@ fn collect_clip_sets(
 /// linking relationships (`light:link`, `shadow:link`, or
 /// `light:filters`). Surfaces the authoring intent so consumers can
 /// decide how to honour it.
-fn collect_light_linking_prims(stage: &openusd::Stage) -> Vec<String> {
+fn collect_light_linking_prims(stage: &openusd::usd::Stage) -> Vec<String> {
     use openusd::sdf::Path;
     let mut out = Vec::new();
     let _ = stage.traverse(|path: &Path| {
@@ -982,7 +982,7 @@ fn collect_light_linking_prims(stage: &openusd::Stage) -> Vec<String> {
 /// (Bevy CPU tessellator, offline exporter) can query this list to
 /// know which meshes to tesselate.
 fn collect_subdivision_prims(
-    stage: &openusd::Stage,
+    stage: &openusd::usd::Stage,
 ) -> Vec<(String, crate::read::geom::SubdivScheme)> {
     use openusd::sdf::Path;
     let mut out = Vec::new();
@@ -1010,7 +1010,7 @@ fn collect_subdivision_prims(
 /// A prim ends up in the output map only when at least ONE of those
 /// three channels has content.
 fn collect_custom_attrs(
-    stage: &openusd::Stage,
+    stage: &openusd::usd::Stage,
 ) -> HashMap<String, crate::prim_ref::UsdCustomAttrs> {
     use openusd::sdf::Path;
     let mut out = HashMap::new();
@@ -1056,7 +1056,7 @@ struct PhysicsSummary {
 /// prim and decodes joint specs. Used by the loader to populate
 /// `UsdAsset` summary lists for the viewer info panel; the actual ECS
 /// projection happens in `physics_attach::attach_physics_to_prim`.
-fn collect_physics(stage: &openusd::Stage) -> PhysicsSummary {
+fn collect_physics(stage: &openusd::usd::Stage) -> PhysicsSummary {
     use openusd::physics as ph;
     let prims = ph::find_physics_prims(stage).unwrap_or_default();
 
@@ -1086,7 +1086,7 @@ fn collect_physics(stage: &openusd::Stage) -> PhysicsSummary {
 /// parallel vectors. Readers return `None` on type mismatch so we try
 /// each reader on each prim.
 fn collect_render(
-    stage: &openusd::Stage,
+    stage: &openusd::usd::Stage,
 ) -> (
     Vec<crate::read::render::ReadRenderSettings>,
     Vec<crate::read::render::ReadRenderProduct>,
@@ -1116,7 +1116,7 @@ fn collect_render(
 /// to `0..1` (a single frame) when not authored, matching Pixar's USD.
 /// `timeCodesPerSecond` defaults to 24 fps (or falls back to
 /// `framesPerSecond` which some authoring tools use instead).
-fn read_stage_timeline(stage: &openusd::Stage) -> (f64, f64, f64) {
+fn read_stage_timeline(stage: &openusd::usd::Stage) -> (f64, f64, f64) {
     use openusd::sdf::{Path, Value};
     let read_f64 = |key: &str| -> Option<f64> {
         match stage.field::<Value>(Path::abs_root(), key).ok().flatten() {
@@ -1136,7 +1136,7 @@ fn read_stage_timeline(stage: &openusd::Stage) -> (f64, f64, f64) {
     (start, end, tcps)
 }
 
-fn has_authored_timeline(stage: &openusd::Stage) -> bool {
+fn has_authored_timeline(stage: &openusd::usd::Stage) -> bool {
     use openusd::sdf::{Path, Value};
     let has_numeric = |key: &str| -> bool {
         matches!(
@@ -1148,7 +1148,7 @@ fn has_authored_timeline(stage: &openusd::Stage) -> bool {
 }
 
 fn collect_stage_skel_animations(
-    stage: &openusd::Stage,
+    stage: &openusd::usd::Stage,
 ) -> Vec<crate::read::skel_anim_text::ReadSkelAnimText> {
     use openusd::sdf::Path;
     let mut out = Vec::new();
@@ -1243,7 +1243,7 @@ fn material_diffuse_overrides_for_variants(
 
 /// Walk the composed stage and collect every `UsdGeom.Camera` prim. The
 /// viewer surfaces these as a mount-able dropdown.
-fn collect_cameras(stage: &openusd::Stage) -> Vec<StageCamera> {
+fn collect_cameras(stage: &openusd::usd::Stage) -> Vec<StageCamera> {
     use openusd::sdf::Path;
     let mut out = Vec::new();
     let _ = stage.traverse(|path: &Path| {
@@ -1260,7 +1260,7 @@ fn collect_cameras(stage: &openusd::Stage) -> Vec<StageCamera> {
 /// Walk the composed stage looking for prims that author `variantSetNames`
 /// and collect the current selection per set. Exposed on `UsdAsset` for UI
 /// surfacing; switching lands in M6.1 via a session layer.
-fn collect_variants(stage: &openusd::Stage) -> HashMap<String, Vec<VariantSet>> {
+fn collect_variants(stage: &openusd::usd::Stage) -> HashMap<String, Vec<VariantSet>> {
     use openusd::sdf::{Path, Value};
 
     let mut out: HashMap<String, Vec<VariantSet>> = HashMap::new();

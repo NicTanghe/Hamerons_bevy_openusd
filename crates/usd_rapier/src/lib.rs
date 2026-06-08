@@ -29,6 +29,7 @@
 //!   construction with axis remap and same-basis vs differing-basis
 //!   routing. Inserts into `MultibodyJointSet` or `ImpulseJointSet`.
 
+pub mod physics_data;
 pub mod bodies;
 pub mod colliders;
 pub mod joints;

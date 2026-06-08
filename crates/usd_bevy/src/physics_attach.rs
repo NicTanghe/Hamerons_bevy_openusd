@@ -15,7 +15,7 @@ use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::Children;
 use bevy::ecs::world::World;
 use bevy::math::{Quat, Vec3};
-use openusd::Stage;
+use openusd::usd::Stage;
 use openusd::sdf::{Path, Value};
 
 use crate::markers::*;

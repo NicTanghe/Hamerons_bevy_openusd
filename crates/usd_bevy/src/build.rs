@@ -1,6 +1,6 @@
 //! Stage → Scene projection.
 //!
-//! Walks a composed [`openusd::Stage`] depth-first and builds a Bevy
+//! Walks a composed [`openusd::usd::Stage`] depth-first and builds a Bevy
 //! [`Scene`] — one entity per `SpecType::Prim`, linked via `ChildOf`. Geom
 //! prims (`Mesh` / `Cube` / `Sphere` / `Cylinder` / `Capsule`) get a
 //! `Mesh3d` + `MeshMaterial3d` with a default flat-gray `StandardMaterial`.
@@ -26,7 +26,7 @@ use bevy::pbr::{MeshMaterial3d, StandardMaterial};
 use bevy::prelude::Visibility;
 use bevy::scene::Scene;
 use bevy::transform::components::Transform;
-use openusd::Stage;
+use openusd::usd::Stage;
 use openusd::sdf::{Path, SpecType};
 use crate::read::geom as ugeom;
 use crate::read::xform as uxf;
