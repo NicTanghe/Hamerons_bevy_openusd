@@ -216,3 +216,29 @@ pub fn read_rel_targets(stage: &Stage, prim: &Path, rel_name: &str) -> anyhow::R
 pub fn read_rel_first_target(stage: &Stage, prim: &Path, rel_name: &str) -> anyhow::Result<Option<String>> {
     Ok(read_rel_targets(stage, prim, rel_name)?.into_iter().next())
 }
+
+// ── Property-path-based access (for graph walks like UsdShade) ──────────
+
+/// Composed `connectionPaths` of the attribute at property path `attr_path`.
+pub fn connections_at(stage: &Stage, attr_path: &Path) -> anyhow::Result<Vec<Path>> {
+    let Some((prim, name)) = attr_path.split_property() else {
+        return Ok(Vec::new());
+    };
+    stage.prim_at(prim).attribute(name).connections()
+}
+
+/// Composed relationship target paths at property path `rel_path`.
+pub fn targets_at(stage: &Stage, rel_path: &Path) -> anyhow::Result<Vec<Path>> {
+    let Some((prim, name)) = rel_path.split_property() else {
+        return Ok(Vec::new());
+    };
+    stage.prim_at(prim).relationship(name).targets()
+}
+
+/// Raw composed `default` value of the attribute at property path `attr_path`.
+pub fn default_at(stage: &Stage, attr_path: &Path) -> anyhow::Result<Option<Value>> {
+    let Some((prim, name)) = attr_path.split_property() else {
+        return Ok(None);
+    };
+    stage.prim_at(prim).attribute(name).get::<Value>()
+}

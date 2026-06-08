@@ -8,6 +8,7 @@ pub mod lux;
 pub mod media;
 pub mod proc;
 pub mod render;
+pub mod shade;
 pub mod skel;
 pub mod skel_anim_text;
 pub mod ui;
