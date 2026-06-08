@@ -33,6 +33,16 @@ pub fn read_double(stage: &Stage, prim: &Path, name: &str) -> anyhow::Result<Opt
     })
 }
 
+/// A `double`, `float`, or `timecode` scalar as `f64`.
+pub fn read_double_or_timecode(stage: &Stage, prim: &Path, name: &str) -> anyhow::Result<Option<f64>> {
+    Ok(match attr_default(stage, prim, name)? {
+        Some(Value::Double(v)) => Some(v),
+        Some(Value::Float(v)) => Some(v as f64),
+        Some(Value::TimeCode(v)) => Some(v),
+        _ => None,
+    })
+}
+
 pub fn read_int(stage: &Stage, prim: &Path, name: &str) -> anyhow::Result<Option<i32>> {
     Ok(match attr_default(stage, prim, name)? {
         Some(Value::Int(v)) => Some(v),
@@ -76,6 +86,14 @@ pub fn read_vec2f(stage: &Stage, prim: &Path, name: &str) -> anyhow::Result<Opti
     Ok(match attr_default(stage, prim, name)? {
         Some(Value::Vec2f(v)) => Some(v.into()),
         Some(Value::Vec2d(v)) => Some([v.x as f32, v.y as f32]),
+        _ => None,
+    })
+}
+
+pub fn read_vec2i(stage: &Stage, prim: &Path, name: &str) -> anyhow::Result<Option<[i32; 2]>> {
+    Ok(match attr_default(stage, prim, name)? {
+        Some(Value::Vec2i(v)) => Some(v.into()),
+        Some(Value::IntVec(v)) if v.len() == 2 => Some([v[0], v[1]]),
         _ => None,
     })
 }
