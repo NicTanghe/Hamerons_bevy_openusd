@@ -1,0 +1,9 @@
+#usda 1.0
+
+over "Cow_F" (
+    variants = {
+        string coat = "jersey"
+    }
+)
+{
+}

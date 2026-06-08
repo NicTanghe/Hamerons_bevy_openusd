@@ -3519,7 +3519,7 @@ pub struct MaterialVariantSet {
     pub per_mesh: Vec<(String, HashMap<String, bevy::asset::Handle<StandardMaterial>>)>,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, dead_code)]
 pub(crate) fn preload_material_variants(
     base_stage: &Stage,
     variants: &HashMap<String, Vec<crate::asset::VariantSet>>,
