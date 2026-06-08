@@ -19,7 +19,7 @@ use openusd::usd::Stage;
 use openusd::sdf::{Path, Value};
 
 use crate::markers::*;
-use openusd::physics as ph;
+use usd_rapier::physics_data as ph;
 
 /// Stage-level conversion factors. Read once at the start of
 /// `stage_to_scene` and threaded through every per-prim attachment.

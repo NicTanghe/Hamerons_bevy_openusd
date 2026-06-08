@@ -1041,7 +1041,7 @@ struct PhysicsSummary {
 /// `UsdAsset` summary lists for the viewer info panel; the actual ECS
 /// projection happens in `physics_attach::attach_physics_to_prim`.
 fn collect_physics(stage: &openusd::usd::Stage) -> PhysicsSummary {
-    use openusd::physics as ph;
+    use usd_rapier::physics_data as ph;
     let prims = ph::find_physics_prims(stage).unwrap_or_default();
 
     let mut joints = Vec::with_capacity(prims.joints.len());
