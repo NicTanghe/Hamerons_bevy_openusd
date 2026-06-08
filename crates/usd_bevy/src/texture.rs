@@ -336,6 +336,72 @@ fn usd_texture_sampler() -> ImageSampler {
     })
 }
 
+/// Locate a texture on disk from a set of search roots — the loader-context-
+/// free core of [`locate_on_filesystem`] (direct join + parent-walk; skips the
+/// cached basename index). Used by the live-update [`AssetServerTextures`].
+pub(crate) fn resolve_texture_fs(search_paths: &[PathBuf], clean: &str) -> Option<PathBuf> {
+    let p = Path::new(clean);
+    if p.is_absolute() && p.exists() {
+        return Some(p.to_path_buf());
+    }
+    for root in search_paths {
+        let candidate = root.join(clean);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    let basename = Path::new(clean).file_name().and_then(|n| n.to_str()).map(|s| s.to_string());
+    for root in search_paths {
+        let mut cur = root.clone();
+        for _ in 0..3 {
+            let Some(parent) = cur.parent() else { break };
+            cur = parent.to_path_buf();
+            let direct = cur.join(clean);
+            if direct.is_file() {
+                return Some(direct);
+            }
+            if let Some(ref bn) = basename {
+                let sibling = cur.join("textures").join(bn);
+                if sibling.is_file() {
+                    return Some(sibling);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// [`TextureSource`] backed by the live [`AssetServer`] — used for incremental
+/// updates (variant switches) where there's no `LoadContext`. Resolves the
+/// texture against the stage's search roots and loads it by absolute path
+/// (cached by the asset server, shared with the bake path).
+pub(crate) struct AssetServerTextures<'a> {
+    pub asset_server: &'a bevy::asset::AssetServer,
+    pub search_paths: &'a [PathBuf],
+}
+
+impl TextureSource for AssetServerTextures<'_> {
+    fn load(&mut self, path: &str, channel: TextureChannel) -> Option<Handle<Image>> {
+        let clean = path.strip_prefix("./").unwrap_or(path);
+        let resolved = resolve_texture_fs(self.search_paths, clean)?;
+        let is_srgb = channel.is_srgb();
+        let sampler = usd_texture_sampler();
+        Some(self.asset_server.load_with_settings::<Image, bevy::image::ImageLoaderSettings>(
+            resolved.to_string_lossy().into_owned(),
+            move |s: &mut bevy::image::ImageLoaderSettings| {
+                s.is_srgb = is_srgb;
+                s.sampler = sampler.clone();
+            },
+        ))
+    }
+    fn load_packed(&mut self, roughness: &str, _metallic: &str) -> Option<Handle<Image>> {
+        // Packing two source images needs CPU decode (no LoadContext here);
+        // for the live path fall back to the roughness map — metallic still
+        // applies via the scalar factor.
+        self.load(roughness, TextureChannel::Linear)
+    }
+}
+
 /// Find a texture on disk. Tries the obvious direct join first; on miss,
 /// walks the search roots once (lazy + cached) and looks the texture up by
 /// basename.

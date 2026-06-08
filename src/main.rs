@@ -122,6 +122,7 @@ fn main() {
         .ok()
         .map(|v| matches!(v.as_str(), "1" | "true" | "on"))
         .unwrap_or(false);
+    app.add_plugins(usd_bevy::incremental::IncrementalPlugin);
     app.add_plugins(usd_bevy::physics::RapierAdapterPlugin)
         .insert_resource(usd_bevy::physics::PhysicsActive(physics_initially_active))
         .add_systems(Startup, spawn_physics_ground)
@@ -178,7 +179,8 @@ fn main() {
             ),
         )
         .add_systems(Update, apply_live_animation_clip)
-        .add_systems(Update, apply_live_material_variant);
+        .add_systems(Update, apply_live_material_variant)
+        .add_systems(Update, (sync_loaded_stage_source, variant_reload_fallback));
     let hide_meshes = std::env::var("BEVY_OPENUSD_HIDE_MESHES")
         .ok()
         .map(|v| matches!(v.as_str(), "1" | "true" | "on"))
@@ -1549,6 +1551,35 @@ fn apply_live_material_variant(
             }
         }
         info!("material variant: live-swapped {prim_path} {set_name}={option} on {applied} mesh(es)");
+    }
+}
+
+/// Keep `LoadedStageSource` in sync with the requested asset + variant
+/// selections so the incremental updater can recompose on a variant switch.
+fn sync_loaded_stage_source(
+    requested: Res<RequestedAsset>,
+    tuning: Res<LoaderTuning>,
+    mut src: ResMut<usd_bevy::incremental::LoadedStageSource>,
+) {
+    if !requested.is_changed() && !tuning.is_changed() {
+        return;
+    }
+    let name = std::path::PathBuf::from(&requested.name);
+    src.source = if name.is_absolute() { name } else { requested.root.join(&name) };
+    src.root = requested.root.clone();
+    src.base_variants = tuning.to_variant_selections();
+}
+
+/// When an incremental variant switch can't be done in place (geometry
+/// changed), fall back to a full reload. `loader_tuning.variants` already
+/// holds the picked selection, so the reload composes the right variant.
+fn variant_reload_fallback(
+    mut fallback: ResMut<usd_bevy::incremental::VariantReloadFallback>,
+    mut reload: ResMut<ReloadRequest>,
+) {
+    if fallback.0 {
+        fallback.0 = false;
+        reload.requested = true;
     }
 }
 
