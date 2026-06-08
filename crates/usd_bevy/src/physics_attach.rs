@@ -144,7 +144,7 @@ pub fn attach_physics_to_prim(
     }
 
     // Most other schemas piggyback on apiSchemas — read once.
-    let api_schemas = stage.api_schemas(path).unwrap_or_default();
+    let api_schemas = stage.prim_at(path.clone()).api_schemas().unwrap_or_default();
 
     // RigidBodyAPI
     if api_schemas.iter().any(|s| s == "PhysicsRigidBodyAPI") {

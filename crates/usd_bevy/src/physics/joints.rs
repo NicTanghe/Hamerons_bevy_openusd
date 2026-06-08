@@ -164,9 +164,9 @@ fn dof_to_openusd(d: UsdDof) -> Dof {
     }
 }
 
-fn drive_type_to_openusd(t: UsdDriveType) -> openusd::physics::DriveType {
+fn drive_type_to_openusd(t: UsdDriveType) -> DriveType {
     match t {
-        UsdDriveType::Acceleration => openusd::physics::DriveType::Acceleration,
-        UsdDriveType::Force => openusd::physics::DriveType::Force,
+        UsdDriveType::Acceleration => DriveType::Acceleration,
+        UsdDriveType::Force => DriveType::Force,
     }
 }
