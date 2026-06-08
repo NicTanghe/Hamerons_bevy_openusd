@@ -859,7 +859,7 @@ fn collect_curves_and_points(
     use openusd::sdf::Path;
     let mut curves = HashMap::new();
     let mut points = HashMap::new();
-    let _ = stage.traverse(|path: &Path| {
+    let _ = stage.traverse(openusd::usd::PrimPredicate::default(), |path: &Path| {
         let type_name: Option<String> = stage
             .prim_at(path.clone()).type_name()
             .ok()
@@ -890,7 +890,7 @@ fn collect_animated_prims(
 ) -> HashMap<String, crate::read::anim::AnimatedPrim> {
     use openusd::sdf::Path;
     let mut out = HashMap::new();
-    let _ = stage.traverse(|path: &Path| {
+    let _ = stage.traverse(openusd::usd::PrimPredicate::default(), |path: &Path| {
         if let Ok(Some(record)) = crate::read::anim::read_animated_prim(stage, path) {
             out.insert(path.as_str().to_string(), record);
         }
@@ -913,7 +913,7 @@ fn collect_skel(
     let mut skeletons = Vec::new();
     let mut skel_roots = Vec::new();
     let mut skel_bindings = Vec::new();
-    let _ = stage.traverse(|path: &Path| {
+    let _ = stage.traverse(openusd::usd::PrimPredicate::default(), |path: &Path| {
         if let Ok(Some(s)) = crate::read::skel::read_skeleton(stage, path) {
             skeletons.push(s);
             return;
@@ -939,7 +939,7 @@ fn collect_clip_sets(
 ) -> std::collections::HashMap<String, Vec<crate::read::clips::ReadClipSet>> {
     use openusd::sdf::Path;
     let mut out = std::collections::HashMap::new();
-    let _ = stage.traverse(|path: &Path| {
+    let _ = stage.traverse(openusd::usd::PrimPredicate::default(), |path: &Path| {
         if let Ok(sets) = crate::read::clips::read_clips(stage, path) {
             if !sets.is_empty() {
                 out.insert(path.as_str().to_string(), sets);
@@ -956,7 +956,7 @@ fn collect_clip_sets(
 fn collect_light_linking_prims(stage: &openusd::usd::Stage) -> Vec<String> {
     use openusd::sdf::Path;
     let mut out = Vec::new();
-    let _ = stage.traverse(|path: &Path| {
+    let _ = stage.traverse(openusd::usd::PrimPredicate::default(), |path: &Path| {
         if let Ok(Some(read)) = crate::read::lux::read_light(stage, path) {
             let common = match &read {
                 crate::read::lux::ReadLight::Distant(d) => &d.common,
@@ -986,7 +986,7 @@ fn collect_subdivision_prims(
 ) -> Vec<(String, crate::read::geom::SubdivScheme)> {
     use openusd::sdf::Path;
     let mut out = Vec::new();
-    let _ = stage.traverse(|path: &Path| {
+    let _ = stage.traverse(openusd::usd::PrimPredicate::default(), |path: &Path| {
         let type_name: Option<String> = stage
             .prim_at(path.clone()).type_name()
             .ok()
@@ -1014,7 +1014,7 @@ fn collect_custom_attrs(
 ) -> HashMap<String, crate::prim_ref::UsdCustomAttrs> {
     use openusd::sdf::Path;
     let mut out = HashMap::new();
-    let _ = stage.traverse(|path: &Path| {
+    let _ = stage.traverse(openusd::usd::PrimPredicate::default(), |path: &Path| {
         let entries = crate::read::geom::read_custom_attrs(stage, path).unwrap_or_default();
         let custom_data = crate::read::geom::read_custom_data(stage, path)
             .ok()
@@ -1096,7 +1096,7 @@ fn collect_render(
     let mut settings = Vec::new();
     let mut products = Vec::new();
     let mut vars = Vec::new();
-    let _ = stage.traverse(|path: &Path| {
+    let _ = stage.traverse(openusd::usd::PrimPredicate::default(), |path: &Path| {
         if let Ok(Some(s)) = crate::read::render::read_render_settings(stage, path) {
             settings.push(s);
             return;
@@ -1152,7 +1152,7 @@ fn collect_stage_skel_animations(
 ) -> Vec<crate::read::skel_anim_text::ReadSkelAnimText> {
     use openusd::sdf::Path;
     let mut out = Vec::new();
-    let _ = stage.traverse(|path: &Path| {
+    let _ = stage.traverse(openusd::usd::PrimPredicate::default(), |path: &Path| {
         if let Ok(Some(anim)) = crate::read::skel::read_skel_animation_stage(stage, path) {
             let has_samples = !anim.translations.is_empty()
                 || !anim.rotations.is_empty()
@@ -1246,7 +1246,7 @@ fn material_diffuse_overrides_for_variants(
 fn collect_cameras(stage: &openusd::usd::Stage) -> Vec<StageCamera> {
     use openusd::sdf::Path;
     let mut out = Vec::new();
-    let _ = stage.traverse(|path: &Path| {
+    let _ = stage.traverse(openusd::usd::PrimPredicate::default(), |path: &Path| {
         if let Ok(Some(read)) = crate::read::camera::read_camera(stage, path) {
             out.push(StageCamera {
                 path: path.as_str().to_string(),
@@ -1265,7 +1265,7 @@ fn collect_variants(stage: &openusd::usd::Stage) -> HashMap<String, Vec<VariantS
 
     let mut out: HashMap<String, Vec<VariantSet>> = HashMap::new();
 
-    let _ = stage.traverse(|path: &Path| {
+    let _ = stage.traverse(openusd::usd::PrimPredicate::default(), |path: &Path| {
         // `variantSetNames` (TokenListOp) holds the set names authored here.
         let names: Vec<String> = match stage
             .metadata::<Value>(path.clone(), "variantSetNames")

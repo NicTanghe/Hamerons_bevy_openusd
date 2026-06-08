@@ -125,7 +125,7 @@ pub fn stage_to_scene(
     // loses ~17 ghost subtrees at origin this way.
     let mut roots_to_walk: Vec<Path> = if let Some(default) = stage.default_prim() {
         match Path::abs_root().append_path(default.as_str()) {
-            Ok(p) if matches!(stage.spec_type(p.clone()), Ok(Some(SpecType::Prim))) => vec![p],
+            Ok(p) if stage.prim_at(p.clone()).is_defined().unwrap_or(false) => vec![p],
             _ => stage
                 .root_prims()
                 .unwrap_or_default()
@@ -653,7 +653,7 @@ impl<'lc, 'a> BuildCtx<'lc, 'a> {
 
 fn mdl_emission_explicitly_disabled(stage: &Stage, material_prim: &Path) -> bool {
     for child_name in stage
-        .prim_children(material_prim.clone())
+        .prim_at(material_prim.clone()).child_names()
         .unwrap_or_default()
     {
         let Ok(shader) = material_prim.append_path(child_name.as_str()) else {
@@ -763,7 +763,7 @@ fn spawn_prim_subtree(
     world: &mut World,
     ctx: &mut BuildCtx<'_, '_>,
 ) {
-    if !matches!(stage.spec_type(path.clone()), Ok(Some(SpecType::Prim))) {
+    if !stage.prim_at(path.clone()).is_defined().unwrap_or(false) {
         return;
     }
     // Read purpose up front; we no longer SKIP proxy/guide prims (the
@@ -1013,7 +1013,7 @@ fn spawn_prim_subtree(
         return;
     }
 
-    for child_name in stage.prim_children(path.clone()).unwrap_or_default() {
+    for child_name in stage.prim_at(path.clone()).child_names().unwrap_or_default() {
         let Ok(child_path) = path.append_path(child_name.as_str()) else {
             continue;
         };
@@ -1064,7 +1064,7 @@ fn collect_geoms_for_collapse(
     depth: u32,
     out: &mut Vec<(Path, Transform)>,
 ) {
-    if !matches!(stage.spec_type(path.clone()), Ok(Some(SpecType::Prim))) {
+    if !stage.prim_at(path.clone()).is_defined().unwrap_or(false) {
         return;
     }
     if !passes_purpose_filter(stage, path) {
@@ -1084,7 +1084,7 @@ fn collect_geoms_for_collapse(
         out.push((path.clone(), accumulated));
     }
 
-    for child_name in stage.prim_children(path.clone()).unwrap_or_default() {
+    for child_name in stage.prim_at(path.clone()).child_names().unwrap_or_default() {
         let Ok(child_path) = path.append_path(child_name.as_str()) else {
             continue;
         };
@@ -1586,7 +1586,7 @@ fn blend_shapes_from_ghost_twin(
                 Err(_) => continue,
             };
             // Only proceed if this prim actually exists.
-            if !matches!(stage.spec_type(candidate.clone()), Ok(Some(SpecType::Prim))) {
+            if !stage.prim_at(candidate.clone()).is_defined().unwrap_or(false) {
                 continue;
             }
             if let Ok(Some(b)) = uskel::read_skel_binding(stage, &candidate) {
@@ -2104,7 +2104,7 @@ const IDENTITY_MAT4: [f32; 16] = [
 /// `attach_skel_root` to find the Skeleton when the SkelRoot's
 /// `skel:skeleton` rel is unauthored.
 fn find_first_typed_descendant(stage: &Stage, root: &Path, target_type: &str) -> Option<Path> {
-    for child_name in stage.prim_children(root.clone()).unwrap_or_default() {
+    for child_name in stage.prim_at(root.clone()).child_names().unwrap_or_default() {
         let Ok(child_path) = root.append_path(child_name.as_str()) else {
             continue;
         };
@@ -2140,7 +2140,7 @@ fn is_root_physics_prim(stage: &Stage, prim: &Path) -> bool {
     if type_name.starts_with("Physics") {
         return true;
     }
-    let api = stage.api_schemas(prim).unwrap_or_default();
+    let api = stage.prim_at(prim.clone()).api_schemas().unwrap_or_default();
     api.iter().any(|s| s.starts_with("Physics"))
 }
 
@@ -2803,7 +2803,7 @@ fn prototype_fingerprint(stage: &Stage, path: &Path) -> String {
 
     fn fold_descendants(stage: &Stage, path: &Path, h: &mut DefaultHasher) {
         let mut children: Vec<String> = stage
-            .prim_children(path.clone())
+            .prim_at(path.clone()).child_names()
             .unwrap_or_default()
             .into_iter()
             .map(|n| n.to_string())
@@ -3226,7 +3226,7 @@ fn mesh_is_y_up(read: &ugeom::ReadMesh) -> bool {
 /// pathway to resolve `prototypes` rels that point at Xform wrappers
 /// rather than direct Mesh prims.
 fn first_renderable_descendant(stage: &Stage, root: &Path) -> Option<Path> {
-    for child_name in stage.prim_children(root.clone()).unwrap_or_default() {
+    for child_name in stage.prim_at(root.clone()).child_names().unwrap_or_default() {
         let Ok(child_path) = root.append_path(child_name.as_str()) else {
             continue;
         };
@@ -3333,7 +3333,7 @@ fn resolve_material_prim(stage: &Stage, bound_prim: &Path, material_prim: &Path)
     };
     let mut found: Option<Path> = None;
     let mut ambiguous = false;
-    let _ = stage.traverse(|path: &Path| {
+    let _ = stage.traverse(openusd::usd::PrimPredicate::default(), |path: &Path| {
         if !ambiguous && path.as_str().ends_with(&tail) && prim_type_is(stage, path, "Material") {
             if found.is_some() {
                 ambiguous = true;

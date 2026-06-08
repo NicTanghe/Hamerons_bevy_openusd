@@ -47,13 +47,13 @@ impl Default for StageMeta {
 /// Collected from the pseudo-root before the main walk.
 pub fn read_stage_meta(stage: &Stage) -> StageMeta {
     let up_axis = stage
-        .field::<String>(Path::abs_root(), "upAxis")
+        .metadata::<String>(Path::abs_root(), "upAxis")
         .ok()
         .flatten();
     // Match `root_basis_transform`'s default-fallback chain so unit
     // conversion stays consistent with the scene-root scale.
     let authored_mpu = stage
-        .field::<Value>(Path::abs_root(), "metersPerUnit")
+        .metadata::<Value>(Path::abs_root(), "metersPerUnit")
         .ok()
         .flatten()
         .and_then(|v| match v {
@@ -69,7 +69,7 @@ pub fn read_stage_meta(stage: &Stage) -> StageMeta {
         .or(authored_mpu)
         .unwrap_or(0.01);
     let kilograms_per_unit = stage
-        .field::<Value>(Path::abs_root(), "kilogramsPerUnit")
+        .metadata::<Value>(Path::abs_root(), "kilogramsPerUnit")
         .ok()
         .flatten()
         .and_then(|v| match v {
@@ -512,7 +512,7 @@ fn collider_shape_from_prim(stage: &Stage, path: &Path, _meta: &StageMeta) -> Us
     // `metersPerUnit=0.01` × scene-root scale `0.01` × shape `0.01`
     // collapsed every collider to millimetre size).
     let type_name = stage
-        .field::<String>(path.clone(), "typeName")
+        .metadata::<String>(path.clone(), "typeName")
         .ok()
         .flatten()
         .unwrap_or_default();
@@ -575,7 +575,7 @@ fn has_mesh_descendant(stage: &Stage, root: &Path) -> bool {
             continue;
         };
         let type_name = stage
-            .field::<String>(child_path.clone(), "typeName")
+            .metadata::<String>(child_path.clone(), "typeName")
             .ok()
             .flatten()
             .unwrap_or_default();
@@ -601,7 +601,7 @@ fn capsule_axis(stage: &Stage, path: &Path) -> Vec3 {
 
 fn read_attr(stage: &Stage, prim: &Path, name: &str) -> Option<Value> {
     let attr = prim.append_property(name).ok()?;
-    stage.field::<Value>(attr, "default").ok().flatten()
+    stage.metadata::<Value>(attr, "default").ok().flatten()
 }
 
 fn read_bool(stage: &Stage, prim: &Path, name: &str) -> Option<bool> {
@@ -636,7 +636,7 @@ fn read_token_attr(stage: &Stage, prim: &Path, name: &str) -> Option<String> {
 
 fn read_rel_first(stage: &Stage, prim: &Path, rel_name: &str) -> Option<String> {
     let rel = prim.append_property(rel_name).ok()?;
-    let raw = stage.field::<Value>(rel, "targetPaths").ok().flatten()?;
+    let raw = stage.metadata::<Value>(rel, "targetPaths").ok().flatten()?;
     let paths = match raw {
         Value::PathListOp(op) => op.flatten(),
         Value::PathVec(v) => v,
