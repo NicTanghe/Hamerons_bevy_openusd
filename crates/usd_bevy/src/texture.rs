@@ -43,6 +43,30 @@ impl TextureChannel {
     }
 }
 
+/// Where a material builder gets its texture handles. The asset loader
+/// implements this over its [`LoadContext`](bevy::asset::LoadContext) (so
+/// textures register against the load); the viewer implements it over the
+/// live [`AssetServer`](bevy::asset::AssetServer) so it can rebuild a
+/// material for an incremental update (e.g. a variant switch) without going
+/// through the loader. This is what lets one material builder serve both the
+/// bake path and the live-update path.
+pub trait TextureSource {
+    fn load(&mut self, path: &str, channel: TextureChannel) -> Option<Handle<Image>>;
+    /// Roughness (G) + metallic (B) packed into one image, per the glTF
+    /// convention Bevy expects. Implementations may fall back to a single
+    /// channel when packing isn't available.
+    fn load_packed(&mut self, roughness: &str, metallic: &str) -> Option<Handle<Image>>;
+}
+
+impl TextureSource for BuildCtx<'_, '_> {
+    fn load(&mut self, path: &str, channel: TextureChannel) -> Option<Handle<Image>> {
+        load_texture(self, path, channel)
+    }
+    fn load_packed(&mut self, roughness: &str, metallic: &str) -> Option<Handle<Image>> {
+        load_metallic_roughness_packed(self, roughness, metallic)
+    }
+}
+
 const IMAGE_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "bmp", "tga", "tif", "tiff", "webp", "hdr", "exr", "ktx2", "dds",
 ];
