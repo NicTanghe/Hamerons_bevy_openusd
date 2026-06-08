@@ -28,8 +28,8 @@ use bevy::scene::Scene;
 use bevy::transform::components::Transform;
 use openusd::Stage;
 use openusd::sdf::{Path, SpecType};
-use usd_schema::geom as ugeom;
-use usd_schema::xform as uxf;
+use crate::read::geom as ugeom;
+use crate::read::xform as uxf;
 
 use crate::curves::{curves_mesh, hermite_to_read_curves, nurbs_to_read_curves, points_mesh};
 use crate::light::{Tally as LightTally, spawn_light};
@@ -50,9 +50,9 @@ use crate::prim_ref::{
 };
 use crate::tetmesh::tetmesh_to_bevy_mesh;
 use crate::texture::{TextureChannel, can_resolve_texture, load_texture};
-use usd_schema::lux as ulux;
-use usd_schema::shade as ushade;
-use usd_schema::skel as uskel;
+use crate::read::lux as ulux;
+use crate::read::shade as ushade;
+use crate::read::skel as uskel;
 
 /// Walks `stage` and produces a standalone [`Scene`] plus labeled sub-assets
 /// for every generated `Mesh` / `StandardMaterial`.
@@ -87,7 +87,7 @@ pub fn stage_to_scene(
     curve_default_radius: f32,
     curve_ring_segments: u32,
     point_scale: f32,
-    skel_animations: &HashMap<String, usd_schema::skel_anim_text::ReadSkelAnimText>,
+    skel_animations: &HashMap<String, crate::read::skel_anim_text::ReadSkelAnimText>,
 ) -> (Scene, LightTally, InstanceStats) {
     let mut world = World::new();
     let mut ctx = BuildCtx::new(
@@ -282,7 +282,7 @@ pub(crate) struct BuildCtx<'lc, 'a> {
     /// SkelAnimation's authored prim name. The build walker looks
     /// them up by SkelRoot's animationSource leaf when it spawns a
     /// SkelRoot.
-    pub skel_animations: &'a HashMap<String, usd_schema::skel_anim_text::ReadSkelAnimText>,
+    pub skel_animations: &'a HashMap<String, crate::read::skel_anim_text::ReadSkelAnimText>,
     /// Diagnostics — how many skinned meshes did we attach
     /// `SkinnedMesh` to vs fail / skip cache. Logged at the end of
     /// stage_to_scene to make "X% of meshes skinned" visible.
@@ -377,7 +377,7 @@ impl<'lc, 'a> BuildCtx<'lc, 'a> {
         curve_default_radius: f32,
         curve_ring_segments: u32,
         point_scale: f32,
-        skel_animations: &'a HashMap<String, usd_schema::skel_anim_text::ReadSkelAnimText>,
+        skel_animations: &'a HashMap<String, crate::read::skel_anim_text::ReadSkelAnimText>,
     ) -> Self {
         Self {
             lc,
@@ -886,7 +886,7 @@ fn spawn_prim_subtree(
     // viewer's tree row prefers over the prim's leaf name. Only
     // attached when authored so the tree falls back to the leaf for
     // unannotated prims.
-    if let Ok(Some(name)) = usd_schema::ui::read_display_name(stage, path)
+    if let Ok(Some(name)) = crate::read::ui::read_display_name(stage, path)
         && !name.is_empty()
     {
         world.entity_mut(entity).insert(UsdDisplayName(name));
@@ -895,7 +895,7 @@ fn spawn_prim_subtree(
     // UsdMediaSpatialAudio — read-side only. The component carries
     // the authored playback metadata; a future bevy_audio backend can
     // pick it up to spawn an actual audio source.
-    if let Ok(Some(sa)) = usd_schema::media::read_spatial_audio(stage, path) {
+    if let Ok(Some(sa)) = crate::read::media::read_spatial_audio(stage, path) {
         world.entity_mut(entity).insert(UsdSpatialAudio {
             file_path: sa.file_path,
             aural_mode: sa.aural_mode,
@@ -907,7 +907,7 @@ fn spawn_prim_subtree(
     // UsdProcGenerativeProcedural (and subclasses) — surface the
     // procedural-type marker. We can't execute the procedural without
     // its engine, but the viewer can at least flag the prim.
-    if let Ok(Some(p)) = usd_schema::proc::read_procedural(stage, path) {
+    if let Ok(Some(p)) = crate::read::proc::read_procedural(stage, path) {
         world.entity_mut(entity).insert(UsdProcedural {
             procedural_type: p.procedural_type,
             procedural_system: p.procedural_system,
@@ -1356,7 +1356,7 @@ fn attach_skel_root(
         // that brings the real data in via prim-targeted reference
         // — sidecar text-scrape would see the empty wrapper prim
         // and clobber walk.usd's real entry under the same name.
-        let from_stage: Option<usd_schema::skel_anim_text::ReadSkelAnimText> =
+        let from_stage: Option<crate::read::skel_anim_text::ReadSkelAnimText> =
             resolved_animation_source
                 .as_deref()
                 .and_then(|p| Path::new(p).ok())
@@ -1380,7 +1380,7 @@ fn attach_skel_root(
                         || !a.scales.is_empty()
                         || !a.blend_shape_weights.is_empty()
                 });
-        let from_sidecar: Option<usd_schema::skel_anim_text::ReadSkelAnimText> = anim_lookup_key
+        let from_sidecar: Option<crate::read::skel_anim_text::ReadSkelAnimText> = anim_lookup_key
             .as_deref()
             .and_then(|k| ctx.skel_animations.get(k))
             .cloned();
@@ -1966,7 +1966,7 @@ fn skel_binding_hash(b: &uskel::ReadSkelBinding) -> String {
 /// since rest = anim.first when anim is authoritative).
 fn augment_skeleton_from_anim(
     skel: &mut uskel::ReadSkeleton,
-    anims: &HashMap<String, usd_schema::skel_anim_text::ReadSkelAnimText>,
+    anims: &HashMap<String, crate::read::skel_anim_text::ReadSkelAnimText>,
 ) {
     let Some(anim) = anims.values().next() else {
         return;

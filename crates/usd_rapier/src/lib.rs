@@ -15,7 +15,7 @@
 //! - The Rapier sets it needs to mutate (passed as separate `&mut` so
 //!   borrows compose cleanly across multiple inserts).
 //! - A pure-Rust description of the authored intent (Pose, mass,
-//!   axis, decoded `openusd::physics::Read*` records).
+//!   axis, decoded `openusd::schemas::physics::Read*` records).
 //!
 //! It returns the handle inserted, leaving caller-side bookkeeping
 //! (entity ↔ handle maps) up to the caller.

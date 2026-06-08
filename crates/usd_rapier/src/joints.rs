@@ -18,7 +18,7 @@
 
 use anyhow::Result;
 use glam::{DQuat, DVec3};
-use openusd::physics::{Dof, JointKind, ReadDrive, ReadJoint};
+use openusd::schemas::physics::{Dof, JointKind, ReadDrive, ReadJoint};
 use rapier3d_f64::prelude::*;
 
 /// Insert the joint into the appropriate Rapier set. `body0`/`body1`
