@@ -157,6 +157,55 @@ pub fn read_quatf_vec(stage: &Stage, prim: &Path, name: &str) -> anyhow::Result<
     })
 }
 
+/// Like [`read_int_vec`] but distinguishes "unauthored" (`None`) from "empty".
+pub fn read_int_vec_opt(stage: &Stage, prim: &Path, name: &str) -> anyhow::Result<Option<Vec<i32>>> {
+    Ok(match attr_default(stage, prim, name)? {
+        Some(Value::IntVec(v)) => Some(v),
+        Some(Value::Int64Vec(v)) => Some(v.into_iter().map(|i| i as i32).collect()),
+        _ => None,
+    })
+}
+
+/// Like [`read_float_vec`] but distinguishes "unauthored" (`None`) from "empty".
+pub fn read_float_vec_opt(stage: &Stage, prim: &Path, name: &str) -> anyhow::Result<Option<Vec<f32>>> {
+    Ok(match attr_default(stage, prim, name)? {
+        Some(Value::FloatVec(v)) => Some(v),
+        Some(Value::DoubleVec(v)) => Some(v.into_iter().map(|d| d as f32).collect()),
+        _ => None,
+    })
+}
+
+/// `matrix4d[]` flattened to row-major `[f32; 16]` per element.
+pub fn read_mat4f_vec(stage: &Stage, prim: &Path, name: &str) -> anyhow::Result<Vec<[f32; 16]>> {
+    Ok(match attr_default(stage, prim, name)? {
+        Some(Value::Matrix4dVec(v)) => v
+            .into_iter()
+            .map(|m| {
+                let mut out = [0.0f32; 16];
+                for (i, slot) in out.iter_mut().enumerate() {
+                    *slot = m.0[i] as f32;
+                }
+                out
+            })
+            .collect(),
+        _ => Vec::new(),
+    })
+}
+
+/// `i32`-valued attribute *metadata* field (e.g. primvar `elementSize`).
+pub fn read_int_metadata(stage: &Stage, prim: &Path, attr: &str, key: &str) -> anyhow::Result<Option<i32>> {
+    Ok(match stage.prim_at(prim.clone()).attribute(attr).get_metadata::<Value>(key)? {
+        Some(Value::Int(n)) => Some(n),
+        Some(Value::Int64(n)) => Some(n as i32),
+        _ => None,
+    })
+}
+
+/// Composed `timeSamples` for an attribute, as `(time, value)` pairs.
+pub fn read_time_samples(stage: &Stage, prim: &Path, name: &str) -> anyhow::Result<Vec<(f64, Value)>> {
+    Ok(stage.prim_at(prim.clone()).attribute(name).time_samples()?.unwrap_or_default())
+}
+
 /// Composed relationship target paths (as strings), in authored order.
 pub fn read_rel_targets(stage: &Stage, prim: &Path, rel_name: &str) -> anyhow::Result<Vec<String>> {
     let targets = stage.prim_at(prim.clone()).relationship(rel_name).targets()?;
