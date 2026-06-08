@@ -12,4 +12,3 @@ rapier3d-f64 = "0.32"
 glam = "0.30"
 anyhow = "1"
 log = "0.4"
-usd_schema = { path = "../usd_schema" }
