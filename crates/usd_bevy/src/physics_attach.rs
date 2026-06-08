@@ -567,7 +567,7 @@ fn collider_shape_from_prim(stage: &Stage, path: &Path, _meta: &StageMeta) -> Us
 /// `collider_shape_from_prim` to recognise Xform-with-CollisionAPI as
 /// a mesh collider when the actual geometry sits one level deeper.
 fn has_mesh_descendant(stage: &Stage, root: &Path) -> bool {
-    let Ok(children) = stage.prim_children(root.clone()) else {
+    let Ok(children) = stage.prim_at(root.clone()).child_names() else {
         return false;
     };
     for child_name in children {
@@ -621,8 +621,8 @@ fn read_double(stage: &Stage, prim: &Path, name: &str) -> Option<f64> {
 
 fn read_vec3f(stage: &Stage, prim: &Path, name: &str) -> Option<[f32; 3]> {
     match read_attr(stage, prim, name)? {
-        Value::Vec3f(v) => Some(v),
-        Value::Vec3d(v) => Some([v[0] as f32, v[1] as f32, v[2] as f32]),
+        Value::Vec3f(v) => Some([v.x, v.y, v.z]),
+        Value::Vec3d(v) => Some([v.x as f32, v.y as f32, v.z as f32]),
         _ => None,
     }
 }

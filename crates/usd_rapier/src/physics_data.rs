@@ -20,8 +20,8 @@ pub enum JointKind {
 #[derive(Debug, Clone, Copy)]
 pub struct ReadLimit {
     pub dof: Dof,
-    pub low: Option<f32>,
-    pub high: Option<f32>,
+    pub low: f32,
+    pub high: f32,
 }
 
 /// One authored `PhysicsDriveAPI` entry on a joint.

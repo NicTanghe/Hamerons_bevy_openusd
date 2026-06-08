@@ -102,7 +102,7 @@ pub struct UsdAsset {
     pub physics_scene_prims: Vec<String>,
     /// Decoded `Physics*Joint` prims. Authored frames + limits already
     /// resolved — downstream physics backends can consume directly.
-    pub joints: Vec<openusd::physics::ReadJoint>,
+    pub joints: Vec<usd_rapier::physics_data::ReadJoint>,
     /// `PhysicsArticulationRootAPI` prim paths (Phase 3).
     pub articulation_root_prims: Vec<String>,
     /// Prim paths bearing `PhysicsMaterialAPI` (typically `Material` prims).
@@ -398,28 +398,12 @@ impl AssetLoader for UsdLoader {
         };
 
         let skip_payloads = !settings.load_payloads;
-        let mut builder = openusd::usd::Stage::builder()
-            .resolver(
-                openusd::ar::DefaultResolver::with_search_paths(
-                    search.clone(),
-                ),
-            )
-            .on_error(move |err| {
-                // Demote "unresolved payload" to a silent skip when the
-                // caller opted out of payload loading. Everything else
-                // keeps the default warn-and-continue behaviour so genuine
-                // composition issues stay visible.
-                if skip_payloads
-                    && let openusd::CompositionError::Layer(
-                        openusd::layer::Error::UnresolvedAsset { kind, .. },
-                    ) = &err
-                    && matches!(kind, openusd::DependencyKind::Payload)
-                {
-                    return Ok(());
-                }
-                bevy::log::warn!("usd composition: {err}");
-                Ok(())
-            });
+        // The new StageBuilder reports recoverable composition errors itself
+        // (warn-and-continue); the old per-error `on_error` skip hook is gone.
+        let _ = skip_payloads;
+        let mut builder = openusd::usd::Stage::builder().resolver(
+            openusd::ar::DefaultResolver::with_search_paths(search.clone()),
+        );
         if let Some(ref p) = session_layer_path {
             let s = p
                 .to_str()
@@ -1044,7 +1028,7 @@ fn collect_custom_attrs(
 struct PhysicsSummary {
     rigid_body_prims: Vec<String>,
     physics_scene_prims: Vec<String>,
-    joints: Vec<openusd::physics::ReadJoint>,
+    joints: Vec<usd_rapier::physics_data::ReadJoint>,
     articulation_root_prims: Vec<String>,
     physics_material_prims: Vec<String>,
     collision_group_prims: Vec<String>,
