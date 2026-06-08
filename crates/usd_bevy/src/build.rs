@@ -799,7 +799,7 @@ fn spawn_prim_subtree(
     let mut replay_ctx: Option<ReplayCtx> = None;
     let is_instanceable = matches!(
         stage
-            .field::<bool>(path.clone(), "instanceable")
+            .metadata::<bool>(path.clone(), "instanceable")
             .ok()
             .flatten(),
         Some(true)
@@ -1915,7 +1915,7 @@ fn direct_skel_rel(stage: &Stage, prim: &Path) -> Option<String> {
 fn direct_rel_first_target(stage: &Stage, prim: &Path, rel_name: &str) -> Option<String> {
     use openusd::sdf::Value;
     let rel = prim.append_property(rel_name).ok()?;
-    let raw = stage.field::<Value>(rel, "targetPaths").ok().flatten()?;
+    let raw = stage.metadata::<Value>(rel, "targetPaths").ok().flatten()?;
     let paths = match raw {
         Value::PathListOp(op) => op.flatten(),
         Value::PathVec(v) => v,
@@ -3184,7 +3184,7 @@ fn resolve_mesh_and_material(
 fn stage_is_z_up(stage: &Stage) -> bool {
     matches!(
         stage
-            .field::<String>(Path::abs_root(), "upAxis")
+            .metadata::<String>(Path::abs_root(), "upAxis")
             .ok()
             .flatten()
             .as_deref(),
@@ -3447,7 +3447,7 @@ fn read_prim_transform(stage: &Stage, path: &Path) -> Transform {
 /// transform that takes USD-native coordinates into Bevy (Y-up, metres).
 fn root_basis_transform(stage: &Stage) -> Transform {
     let up_axis = stage
-        .field::<String>(Path::abs_root(), "upAxis")
+        .metadata::<String>(Path::abs_root(), "upAxis")
         .ok()
         .flatten();
 
@@ -3461,7 +3461,7 @@ fn root_basis_transform(stage: &Stage) -> Transform {
     // reading it as 1.0 makes a 5 m kitchen render as 500 m and the
     // camera frames a "scattered" wasteland of distant props.
     let authored_mpu = stage
-        .field::<openusd::sdf::Value>(Path::abs_root(), "metersPerUnit")
+        .metadata::<openusd::sdf::Value>(Path::abs_root(), "metersPerUnit")
         .ok()
         .flatten()
         .and_then(|v| match v {

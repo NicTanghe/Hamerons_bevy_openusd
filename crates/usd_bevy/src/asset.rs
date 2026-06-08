@@ -1119,7 +1119,7 @@ fn collect_render(
 fn read_stage_timeline(stage: &openusd::usd::Stage) -> (f64, f64, f64) {
     use openusd::sdf::{Path, Value};
     let read_f64 = |key: &str| -> Option<f64> {
-        match stage.field::<Value>(Path::abs_root(), key).ok().flatten() {
+        match stage.metadata::<Value>(Path::abs_root(), key).ok().flatten() {
             Some(Value::Double(d)) => Some(d),
             Some(Value::Float(f)) => Some(f as f64),
             Some(Value::Int(i)) => Some(i as f64),
@@ -1140,7 +1140,7 @@ fn has_authored_timeline(stage: &openusd::usd::Stage) -> bool {
     use openusd::sdf::{Path, Value};
     let has_numeric = |key: &str| -> bool {
         matches!(
-            stage.field::<Value>(Path::abs_root(), key).ok().flatten(),
+            stage.metadata::<Value>(Path::abs_root(), key).ok().flatten(),
             Some(Value::Double(_) | Value::Float(_) | Value::Int(_) | Value::TimeCode(_))
         )
     };
@@ -1268,7 +1268,7 @@ fn collect_variants(stage: &openusd::usd::Stage) -> HashMap<String, Vec<VariantS
     let _ = stage.traverse(|path: &Path| {
         // `variantSetNames` (TokenListOp) holds the set names authored here.
         let names: Vec<String> = match stage
-            .field::<Value>(path.clone(), "variantSetNames")
+            .metadata::<Value>(path.clone(), "variantSetNames")
             .ok()
             .flatten()
         {
@@ -1282,7 +1282,7 @@ fn collect_variants(stage: &openusd::usd::Stage) -> HashMap<String, Vec<VariantS
 
         // `variantSelection` is a HashMap<set_name, selection_value>.
         let selections = match stage
-            .field::<Value>(path.clone(), "variantSelection")
+            .metadata::<Value>(path.clone(), "variantSelection")
             .ok()
             .flatten()
         {
@@ -1299,7 +1299,7 @@ fn collect_variants(stage: &openusd::usd::Stage) -> HashMap<String, Vec<VariantS
                 // `/Prim{setName=}` (empty selection = the container).
                 let set_path = path.append_variant_selection(&name, "");
                 let options: Vec<String> = match stage
-                    .field::<Value>(set_path, "variantChildren")
+                    .metadata::<Value>(set_path, "variantChildren")
                     .ok()
                     .flatten()
                 {

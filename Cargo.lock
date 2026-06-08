@@ -4047,7 +4047,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "openusd"
 version = "0.4.0"
-source = "git+https://github.com/mxpv/openusd?rev=750af7e5fff62b46a8107ce92217ed849d3f4fe1#750af7e5fff62b46a8107ce92217ed849d3f4fe1"
+source = "git+https://github.com/bresilla/openusd?rev=43abaf1fad6aea34c76b53bc1c89f12dcad7835b#43abaf1fad6aea34c76b53bc1c89f12dcad7835b"
 dependencies = [
  "anyhow",
  "bitflags 2.11.1",
