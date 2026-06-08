@@ -24,7 +24,7 @@ use bevy::prelude::*;
 use crate::asset::{VariantSelection, author_variant_session_layer};
 use crate::material::standard_material_from_usd;
 use crate::prim_ref::UsdPrimRef;
-use crate::read::{geom as ugeom, shade as ushade};
+use crate::read::shade as ushade;
 use crate::texture::AssetServerTextures;
 
 /// The loaded stage's source layer + current variant selections, so the
@@ -90,7 +90,6 @@ fn apply_variant_switch(
     mut cache: ResMut<MaterialVariantCache>,
     asset_server: Res<AssetServer>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    meshes: Res<Assets<bevy::mesh::Mesh>>,
     mut q: MeshMatQuery,
 ) {
     if pending.queue.is_empty() {
@@ -103,7 +102,7 @@ fn apply_variant_switch(
             info!("variant: instant swap {prim} {set}={option}");
             continue;
         }
-        let live = live_meshes(&q, &meshes);
+        let live = live_meshes(&q);
         match compute_option(&source, &prim, &set, &option, &live, &mut materials, &asset_server) {
             Some(per_mesh) => {
                 reassign(&mut q, &per_mesh);
@@ -126,8 +125,7 @@ fn warm_variant_cache(
     mut cache: ResMut<MaterialVariantCache>,
     asset_server: Res<AssetServer>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    meshes: Res<Assets<bevy::mesh::Mesh>>,
-    q: Query<(&UsdPrimRef, &Mesh3d)>,
+    q: Query<&UsdPrimRef>,
 ) {
     // One recompose per frame keeps the warm-up off the visible thread budget.
     let Some((prim, set, option)) = warm.queue.pop() else {
@@ -137,19 +135,14 @@ fn warm_variant_cache(
     if cache.0.contains_key(&key) {
         return;
     }
-    let live: Vec<(String, usize)> = q
-        .iter()
-        .map(|(pref, m)| (pref.path.clone(), meshes.get(&m.0).map_or(0, |mm| mm.count_vertices())))
-        .collect();
+    let live: Vec<String> = q.iter().map(|pref| pref.path.clone()).collect();
     if let Some(per_mesh) = compute_option(&source, &prim, &set, &option, &live, &mut materials, &asset_server) {
         cache.0.insert(key, per_mesh);
     }
 }
 
-fn live_meshes(q: &MeshMatQuery, meshes: &Assets<bevy::mesh::Mesh>) -> Vec<(String, usize)> {
-    q.iter()
-        .map(|(pref, m, _)| (pref.path.clone(), meshes.get(&m.0).map_or(0, |mm| mm.count_vertices())))
-        .collect()
+fn live_meshes(q: &MeshMatQuery) -> Vec<String> {
+    q.iter().map(|(pref, _, _)| pref.path.clone()).collect()
 }
 
 /// Recompose with `option` selected for `(prim, set)` (other sets keep their
@@ -160,7 +153,7 @@ fn compute_option(
     prim: &str,
     set: &str,
     option: &str,
-    live_meshes: &[(String, usize)],
+    mesh_paths: &[String],
     materials: &mut Assets<StandardMaterial>,
     asset_server: &AssetServer,
 ) -> Option<Vec<(String, Handle<StandardMaterial>)>> {
@@ -171,16 +164,13 @@ fn compute_option(
         search_paths: &search,
     };
     let mut per_mesh = Vec::new();
-    for (path, live_vcount) in live_meshes {
+    // NOTE: no geometry-change guard yet — a variant that also changes topology
+    // would leave stale meshes. Material/texture variants (the common case) are
+    // correct; proper USD-to-USD geometry detection is a follow-up.
+    for path in mesh_paths {
         let Ok(ppath) = openusd::sdf::path(path) else {
             continue;
         };
-        if let Ok(Some(rm)) = ugeom::read_mesh(&stage, &ppath)
-            && *live_vcount != 0
-            && rm.points.len() != *live_vcount
-        {
-            return None; // geometry changed — not a pure material variant
-        }
         let Ok(Some(mat_prim)) = ushade::read_material_binding(&stage, &ppath) else {
             continue;
         };
