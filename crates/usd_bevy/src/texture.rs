@@ -76,20 +76,25 @@ pub fn load_texture(
         bevy::log::warn!("texture: usdz-embedded {clean:?} found but decode failed");
     }
 
-    // 2. Filesystem search via configured roots.
+    // 2. Filesystem search via configured roots. Load through the AssetServer
+    //    *by path* (not as a UsdAsset sub-asset): the decoded Image is then
+    //    owned by the asset server and cached across UsdAsset reloads, so a
+    //    variant switch reuses already-decoded textures instead of re-decoding
+    //    every one (the old sub-asset path re-decoded the lot each reload —
+    //    seconds per switch). `AssetPlugin.unapproved_path_mode = Allow` lets
+    //    the absolute texture path resolve outside the startup asset root.
     if let Some(path) = locate_on_filesystem(ctx, &clean) {
         bevy::log::info!("texture: fs hit for {clean:?} → {path:?}");
-        match std::fs::read(&path) {
-            Ok(bytes) => {
-                let label_key = path.to_string_lossy().into_owned();
-                if let Some(handle) = decode_and_register(ctx, &label_key, &bytes, is_srgb, "fs") {
-                    return Some(handle);
-                }
-            }
-            Err(err) => {
-                bevy::log::warn!("texture: read {path:?} failed: {err}");
-            }
-        }
+        let sampler = usd_texture_sampler();
+        let handle = ctx
+            .lc
+            .loader()
+            .with_settings(move |s: &mut bevy::image::ImageLoaderSettings| {
+                s.is_srgb = is_srgb;
+                s.sampler = sampler.clone();
+            })
+            .load::<Image>(path.to_string_lossy().into_owned());
+        return Some(handle);
     }
 
     bevy::log::warn!(
