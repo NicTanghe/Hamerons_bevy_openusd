@@ -89,3 +89,8 @@ bevy_glacial = { git = "https://github.com/bresilla/bevy_glacial", branch = "mai
 [build-dependencies]
 zip = { version = "8", default-features = false, features = ["deflate"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+[dev-dependencies]
+# Used by tests/project_usdz.rs to author a USDZ + verify embedded textures.
+zip = { version = "8", default-features = false, features = ["deflate"] }
+image = "0.25"
