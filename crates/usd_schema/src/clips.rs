@@ -46,7 +46,7 @@ pub struct ReadClipSet {
 /// Read every clip set authored on `prim`. Covers both layouts:
 ///   - legacy loose fields → exposed as a single `"default"` set.
 ///   - modern `clips` dict → one `ReadClipSet` per key.
-pub fn read_clips(stage: &openusd::Stage, prim: &Path) -> Result<Vec<ReadClipSet>> {
+pub fn read_clips(stage: &openusd::usd::Stage, prim: &Path) -> Result<Vec<ReadClipSet>> {
     let mut out = Vec::new();
 
     // Modern form: `clips = { ... }` dict, keyed by set name.
@@ -70,7 +70,7 @@ pub fn read_clips(stage: &openusd::Stage, prim: &Path) -> Result<Vec<ReadClipSet
     Ok(out)
 }
 
-fn legacy_clip_set(stage: &openusd::Stage, prim: &Path) -> Result<ReadClipSet> {
+fn legacy_clip_set(stage: &openusd::usd::Stage, prim: &Path) -> Result<ReadClipSet> {
     let clip_prim_path = string_field(stage, prim, "clipPrimPath")?;
     let asset_paths = asset_path_vec_field(stage, prim, "clipAssetPaths")?;
     let active = f64_i64_pair_vec(stage, prim, "clipActive")?;
@@ -146,7 +146,7 @@ fn dict_pair_vec_f64_i64(
     }
 }
 
-fn string_field(stage: &openusd::Stage, prim: &Path, name: &str) -> Result<Option<String>> {
+fn string_field(stage: &openusd::usd::Stage, prim: &Path, name: &str) -> Result<Option<String>> {
     Ok(
         match stage
             .field::<Value>(prim.clone(), name)
@@ -158,7 +158,7 @@ fn string_field(stage: &openusd::Stage, prim: &Path, name: &str) -> Result<Optio
     )
 }
 
-fn asset_path_vec_field(stage: &openusd::Stage, prim: &Path, name: &str) -> Result<Vec<String>> {
+fn asset_path_vec_field(stage: &openusd::usd::Stage, prim: &Path, name: &str) -> Result<Vec<String>> {
     Ok(
         match stage
             .field::<Value>(prim.clone(), name)
@@ -170,7 +170,7 @@ fn asset_path_vec_field(stage: &openusd::Stage, prim: &Path, name: &str) -> Resu
     )
 }
 
-fn f64_pair_vec(stage: &openusd::Stage, prim: &Path, name: &str) -> Result<Vec<(f64, f64)>> {
+fn f64_pair_vec(stage: &openusd::usd::Stage, prim: &Path, name: &str) -> Result<Vec<(f64, f64)>> {
     Ok(
         match stage
             .field::<Value>(prim.clone(), name)
@@ -182,7 +182,7 @@ fn f64_pair_vec(stage: &openusd::Stage, prim: &Path, name: &str) -> Result<Vec<(
     )
 }
 
-fn f64_i64_pair_vec(stage: &openusd::Stage, prim: &Path, name: &str) -> Result<Vec<(f64, i64)>> {
+fn f64_i64_pair_vec(stage: &openusd::usd::Stage, prim: &Path, name: &str) -> Result<Vec<(f64, i64)>> {
     Ok(
         match stage
             .field::<Value>(prim.clone(), name)

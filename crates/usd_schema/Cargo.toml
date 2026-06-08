@@ -8,8 +8,17 @@ repository = "https://github.com/bresilla/urdf2usd"
 keywords = ["usd", "openusd", "schema", "usdgeom", "usdphysics"]
 categories = ["graphics", "rendering::data-formats"]
 
+[features]
+# MDL -> UsdPreviewSurface conversion (Omniverse). Gated off until its
+# stage-loading / writer calls are migrated to the current openusd API.
+mdl = []
+# Value-clip introspection. Gated off: it needs arbitrary composed-field
+# reads, but openusd made `Stage::field` private and keeps detailed clip
+# introspection (`ClipSet`) crate-internal — needs a public reader upstream.
+clips = []
+
 [dependencies]
 # Spec-level (Sdf) reader/writer. We provide the schema layer on top.
-openusd = { git = "https://github.com/mxpv/openusd", rev = "fe92b73224c611831be244afac9cf7654b5ef51e" }
+openusd = { git = "https://github.com/mxpv/openusd", rev = "750af7e5fff62b46a8107ce92217ed849d3f4fe1" }
 anyhow = "1"
 glam = "0.30"

@@ -1,60 +1,29 @@
-//! Schema-authoring helpers layered on top of `openusd::sdf::Data`.
+//! Authoring + value-clip helpers layered on top of `openusd`.
 //!
-//! `openusd` is schema-agnostic — it exposes the Sdf (spec) layer only,
-//! with no typed `UsdGeom::Mesh`, `UsdPhysics::RigidBodyAPI`, or
-//! `UsdShade::Material` builders. This crate is the thin convenience
-//! layer you would otherwise write by hand for every tool that needs
-//! to author composed USD from Rust: it stamps the right `TypeName`
-//! tokens, `apiSchemas` list ops, relationships, and attribute
-//! defaults that Pixar's C++ schema classes would emit.
+//! Most of what this crate used to provide — typed readers for UsdGeom /
+//! UsdLux / UsdShade / UsdSkel / UsdRender / … — now lives upstream in
+//! `openusd` as typed `Prim` views, so consumers read those directly.
+//! What remains here is the bit `openusd` does not (yet) cover:
 //!
-//! Modules:
-//! - [`xform`] — `Xformable` transform ops (translate / orient / scale).
-//! - [`geom`] — `UsdGeom.{Cube, Sphere, Cylinder, Capsule, Mesh,
-//!   GeomSubset}` primitives.
-//! - [`physics`] — `UsdPhysics.{Scene, RigidBodyAPI, MassAPI,
-//!   CollisionAPI, MeshCollisionAPI, *Joint, LimitAPI,
-//!   ArticulationRootAPI}` authoring plus `NewtonMimicAPI` for the
-//!   Newton ecosystem.
-//! - [`shade`] — `UsdShade.{Material, Shader}` with a full
-//!   `UsdPreviewSurface` + per-channel `UsdUVTexture` graph and the
-//!   PreviewMaterial input-interface promotion pattern.
-//! - [`tokens`] — string constants for every schema name we author.
-//! - [`math`] — tiny math helpers used by `xform` (RPY → quaternion).
+//! - the in-memory authoring [`Stage`] used to *write* composed USD,
+//! - [`clips`] — value-clip introspection,
+//! - [`math`] — tiny RPY → quaternion helper,
+//! - [`tokens`] — schema name constants used by the authoring side,
+//! - [`third_party`] — MDL → UsdPreviewSurface conversion (Omniverse).
 //!
 //! Errors surface through `anyhow::Error` so callers can adapt freely.
 
-pub mod anim;
-pub mod camera;
+#[cfg(feature = "clips")]
 pub mod clips;
-pub mod geom;
-pub mod lux;
 pub mod math;
-pub mod media;
-pub mod proc;
-pub mod render;
-pub mod shade;
-pub mod skel;
-/// Sidecar text-mode parser for `UsdSkelAnimation` prims authored in
-/// USDA. Pixar's `HumanFemale.walk.usd` (and most production walk
-/// cycles) author tuple-valued time samples for `quatf[] rotations`,
-/// `float3[] translations`, and `half3[] scales` that openusd-rs's
-/// USDA parser currently rejects (`Unsupported property metadata
-/// value token: Punctuation('(')`). This module reads the raw .usda
-/// text and extracts the SkelAnimation samples directly so we can
-/// drive joint transforms while the upstream parser is fixed.
-pub mod skel_anim_text;
 pub mod tokens;
-pub mod ui;
-pub mod xform;
 
-/// Glue + workarounds for the third-party `openusd-rs` crate that
-/// don't fit the schema-authoring story the rest of this crate is
-/// about — strip-metadata preprocess, a strip-aware `Resolver`, and
-/// MDL → UsdPreviewSurface conversion. Lives under the `3rd_party/`
-/// folder on disk; `#[path]` lets Rust accept the digit-leading
-/// folder name while exposing it as the valid identifier
-/// `third_party`.
+/// MDL → UsdPreviewSurface conversion for Omniverse-authored scenes.
+/// Lives under the `3rd_party/` folder on disk; `#[path]` lets Rust
+/// accept the digit-leading folder name while exposing it as the valid
+/// identifier `third_party`. Gated behind the `mdl` feature until its
+/// stage-loading / writer calls are migrated to the current openusd API.
+#[cfg(feature = "mdl")]
 #[path = "3rd_party/mod.rs"]
 pub mod third_party;
 
@@ -340,7 +309,7 @@ impl Stage {
     /// Write the stage to disk as `.usda`.
     pub fn write_usda(mut self, path: impl AsRef<StdPath>) -> Result<()> {
         self.flush_children();
-        self.data.write_usda(path).map_err(anyhow::Error::from)
+        openusd::usda::TextWriter::write_to_file(&self.data, path)
     }
 
     /// Merge every spec + bookkeeping entry from `other` into `self`.
