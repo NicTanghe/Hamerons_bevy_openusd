@@ -27,7 +27,7 @@ use bevy::prelude::Visibility;
 use bevy::scene::Scene;
 use bevy::transform::components::Transform;
 use openusd::usd::Stage;
-use openusd::sdf::{Path, SpecType};
+use openusd::sdf::Path;
 use crate::read::geom as ugeom;
 use crate::read::xform as uxf;
 
@@ -1553,7 +1553,7 @@ fn blend_shapes_from_ghost_twin(
     // under the ghost twin. e.g.
     // `/Skel/Geometry/HumanFemale/Geom/.../Body_sbdv`
     // → tail starts at `/HumanFemale/Geom/.../Body_sbdv`.
-    let mut parts: Vec<&str> = composed_str.split('/').filter(|s| !s.is_empty()).collect();
+    let parts: Vec<&str> = composed_str.split('/').filter(|s| !s.is_empty()).collect();
     if parts.len() < 3 {
         return None;
     }

@@ -170,7 +170,7 @@ pub fn mesh_from_usd_subset_with_skin(
             let mut wgt = Vec::with_capacity(p.len());
             for face_verts in &read.face_vertex_counts {
                 let n = *face_verts as usize;
-                let mut consumed = 0usize;
+                let consumed = 0usize;
                 let _ = n;
                 let _ = consumed; // silence unused if loop empty
                 for k in 0..(*face_verts as usize) {
