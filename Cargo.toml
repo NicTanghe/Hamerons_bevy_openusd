@@ -24,6 +24,7 @@ path = "src/main.rs"
 # components, Rapier physics adapter. Single dep brings in everything
 # needed to load a USD into a Bevy app.
 usd_bevy = { path = "crates/usd_bevy" }
+usd_rapier = { path = "crates/usd_rapier" }
 # Pure-Rust USD — the viewer reads camera projection and anim track
 # data directly off the loaded `Stage` via openusd's typed views.
 openusd = { git = "https://github.com/bresilla/openusd", rev = "43abaf1fad6aea34c76b53bc1c89f12dcad7835b", features = ["geom", "lux", "media", "proc", "render", "shade", "skel", "ui", "physics"] }

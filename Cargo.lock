@@ -5553,6 +5553,7 @@ dependencies = [
  "rapier3d-f64",
  "rfd",
  "usd_bevy",
+ "usd_rapier",
  "zip",
 ]
 
