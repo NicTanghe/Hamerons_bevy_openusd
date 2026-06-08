@@ -4,6 +4,7 @@
 
 pub mod anim;
 pub mod camera;
+pub mod geom;
 pub mod lux;
 pub mod media;
 pub mod proc;

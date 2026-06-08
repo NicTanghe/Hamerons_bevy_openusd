@@ -33,12 +33,12 @@ pub fn read_double(stage: &Stage, prim: &Path, name: &str) -> anyhow::Result<Opt
     })
 }
 
-/// A `double`, `float`, or `timecode` scalar as `f64`.
+/// A `double`, `float`, or `timecode` scalar as `f64`. (openusd decodes
+/// `timecode` into a `Double`, so the two collapse here.)
 pub fn read_double_or_timecode(stage: &Stage, prim: &Path, name: &str) -> anyhow::Result<Option<f64>> {
     Ok(match attr_default(stage, prim, name)? {
         Some(Value::Double(v)) => Some(v),
         Some(Value::Float(v)) => Some(v as f64),
-        Some(Value::TimeCode(v)) => Some(v),
         _ => None,
     })
 }
