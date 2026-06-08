@@ -2,6 +2,7 @@
 //! structs the Bevy projection consumes. Replaces the former `usd_schema`
 //! reader crate; everything here reads through openusd only.
 
+pub mod anim;
 pub mod camera;
 pub mod lux;
 pub mod media;
