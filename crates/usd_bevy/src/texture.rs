@@ -56,6 +56,9 @@ pub trait TextureSource {
     /// convention Bevy expects. Implementations may fall back to a single
     /// channel when packing isn't available.
     fn load_packed(&mut self, roughness: &str, metallic: &str) -> Option<Handle<Image>>;
+    /// Whether `path` resolves to a real texture (used by name-guessing to
+    /// probe candidates without emitting "unresolved" warnings).
+    fn can_resolve(&mut self, path: &str) -> bool;
 }
 
 impl TextureSource for BuildCtx<'_, '_> {
@@ -64,6 +67,9 @@ impl TextureSource for BuildCtx<'_, '_> {
     }
     fn load_packed(&mut self, roughness: &str, metallic: &str) -> Option<Handle<Image>> {
         load_metallic_roughness_packed(self, roughness, metallic)
+    }
+    fn can_resolve(&mut self, path: &str) -> bool {
+        can_resolve_texture(self, path)
     }
 }
 
@@ -399,6 +405,10 @@ impl TextureSource for AssetServerTextures<'_> {
         // for the live path fall back to the roughness map — metallic still
         // applies via the scalar factor.
         self.load(roughness, TextureChannel::Linear)
+    }
+    fn can_resolve(&mut self, path: &str) -> bool {
+        let clean = path.strip_prefix("./").unwrap_or(path);
+        resolve_texture_fs(self.search_paths, clean).is_some()
     }
 }
 

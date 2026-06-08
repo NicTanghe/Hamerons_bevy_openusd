@@ -22,7 +22,6 @@ use bevy::pbr::{MeshMaterial3d, StandardMaterial};
 use bevy::prelude::*;
 
 use crate::asset::{VariantSelection, author_variant_session_layer};
-use crate::material::standard_material_from_usd;
 use crate::prim_ref::UsdPrimRef;
 use crate::read::shade as ushade;
 use crate::texture::AssetServerTextures;
@@ -174,10 +173,10 @@ fn compute_option(
         let Ok(Some(mat_prim)) = ushade::read_material_binding(&stage, &ppath) else {
             continue;
         };
-        let Ok(Some(read)) = ushade::read_preview_material(&stage, &mat_prim) else {
-            continue;
-        };
-        let handle = materials.add(standard_material_from_usd(&mut tex, &read));
+        // Full builder (name-guessed textures, glass, MDL fix) so the live
+        // material matches what the loader bakes — not a stripped-down grey.
+        let mat = crate::build::build_material_inner(&stage, &mat_prim, false, &mut tex, None);
+        let handle = materials.add(mat);
         per_mesh.push((path.clone(), handle));
     }
     Some(per_mesh)
