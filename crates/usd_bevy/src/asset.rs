@@ -138,6 +138,10 @@ pub struct UsdAsset {
     /// compose clip layers yet; this surfaces the authoring so
     /// downstream tools can honour it manually.
     pub clip_sets: std::collections::HashMap<String, Vec<crate::read::clips::ReadClipSet>>,
+    /// Material-affecting variant sets with per-option prebuilt material
+    /// handles. Lets the viewer switch texture/material variants by swapping
+    /// `MeshMaterial3d` live, with no scene rebuild.
+    pub material_variants: Vec<build::MaterialVariantSet>,
 }
 
 /// One authored `UsdGeom.Camera` with its prim path + decoded params.
@@ -318,6 +322,10 @@ impl AssetLoader for UsdLoader {
 
         let asset_path = load_context.path();
         let fs_path: &Path = asset_path.path();
+        // Owned copy of the source path: used by the variant-preload closure
+        // below so it doesn't keep `load_context.path()` borrowed across the
+        // loader's later `&mut load_context` calls.
+        let fs_path_owned = fs_path.to_path_buf();
         let ext_hint = fs_path
             .extension()
             .and_then(|e| e.to_str())
@@ -595,6 +603,43 @@ impl AssetLoader for UsdLoader {
         };
         let scene_handle = load_context.add_labeled_asset(scene_label, scene);
 
+        // Preload material-affecting variant options up front so the viewer
+        // swaps them live (no scene rebuild). Costs one extra recompose per
+        // option at load — the trade for instant switching.
+        let material_variants = {
+            let base_variants = effective_variants.clone();
+            let open_option = |prim: &str, set: &str, option: &str| -> Option<openusd::usd::Stage> {
+                let mut sels = base_variants.clone();
+                sels.push(VariantSelection {
+                    prim_path: prim.to_string(),
+                    set_name: set.to_string(),
+                    option: option.to_string(),
+                });
+                let text = author_variant_session_layer(&sels);
+                let session_tmp = tempfile_session(&tmp_dir, &fs_path_owned, &sels, &text);
+                std::fs::write(&session_tmp, &text).ok()?;
+                let builder = openusd::usd::Stage::builder()
+                    .resolver(openusd::ar::DefaultResolver::with_search_paths(search.clone()))
+                    .session_layer(session_tmp.to_str()?.to_string());
+                builder.open(tmp_str).ok()
+            };
+            build::preload_material_variants(
+                &stage,
+                &variants,
+                open_option,
+                load_context,
+                &embedded,
+                &search,
+                &material_diffuse_overrides,
+                settings.kind_collapse,
+                settings.light_intensity_scale,
+                settings.curve_default_radius,
+                settings.curve_ring_segments,
+                settings.point_scale,
+                &skel_animations,
+            )
+        };
+
         let _ = std::fs::remove_file(&tmp);
 
         let usd_asset = UsdAsset {
@@ -632,6 +677,7 @@ impl AssetLoader for UsdLoader {
             subdivision_prims,
             light_linking_prims,
             clip_sets,
+            material_variants,
         };
 
         // If the caller supplied any `variant_selections`, Bevy's

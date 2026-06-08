@@ -555,11 +555,12 @@ impl<'lc, 'a> BuildCtx<'lc, 'a> {
         stage: &Stage,
         material_prim: &Path,
         double_sided: bool,
+        label_suffix: &str,
     ) -> bevy::asset::Handle<StandardMaterial> {
         let key = if double_sided {
-            format!("{}#doubleSided", material_prim.as_str())
+            format!("{}#doubleSided{label_suffix}", material_prim.as_str())
         } else {
-            material_prim.as_str().to_string()
+            format!("{}{label_suffix}", material_prim.as_str())
         };
         if let Some(h) = self.material_cache.get(&key) {
             return h.clone();
@@ -641,9 +642,9 @@ impl<'lc, 'a> BuildCtx<'lc, 'a> {
             bevy_mat.cull_mode = None;
         }
         let label = if double_sided {
-            format!("{}-doubleSided", material_prim.as_str())
+            format!("{}-doubleSided{label_suffix}", material_prim.as_str())
         } else {
-            material_prim.as_str().to_string()
+            format!("{}{label_suffix}", material_prim.as_str())
         };
         let handle = add_material_labeled(self.lc, &label, bevy_mat);
         self.material_cache.insert(key, handle.clone());
@@ -2723,7 +2724,7 @@ fn spawn_mesh_with_subsets(
         let mat = match binding {
             Some(mat_prim) => {
                 let mat_prim = resolve_material_prim(stage, mesh_path, &mat_prim);
-                ctx.material_for(stage, &mat_prim, read.double_sided)
+                ctx.material_for(stage, &mat_prim, read.double_sided, "")
             }
             None if read.display_color.is_some() => {
                 ctx.vertex_color_modulated_material_ds(read.double_sided)
@@ -2762,7 +2763,7 @@ fn spawn_mesh_with_subsets(
         let mat = match parent_binding {
             Some(mat_prim) => {
                 let mat_prim = resolve_material_prim(stage, mesh_path, &mat_prim);
-                ctx.material_for(stage, &mat_prim, read.double_sided)
+                ctx.material_for(stage, &mat_prim, read.double_sided, "")
             }
             None if read.display_color.is_some() => {
                 ctx.vertex_color_modulated_material_ds(read.double_sided)
@@ -3260,7 +3261,7 @@ fn resolve_material(
     match ushade::read_material_binding(stage, prim).ok().flatten() {
         Some(mat_prim) => {
             let mat_prim = resolve_material_prim(stage, prim, &mat_prim);
-            ctx.material_for(stage, &mat_prim, false)
+            ctx.material_for(stage, &mat_prim, false, "")
         }
         None => ctx.default_material(),
     }
@@ -3282,7 +3283,7 @@ fn resolve_material_with_display_color(
     match ushade::read_material_binding(stage, prim).ok().flatten() {
         Some(mat_prim) => {
             let mat_prim = resolve_material_prim(stage, prim, &mat_prim);
-            ctx.material_for(stage, &mat_prim, double_sided)
+            ctx.material_for(stage, &mat_prim, double_sided, "")
         }
         None if has_display_color => ctx.vertex_color_modulated_material_ds(double_sided),
         // No material binding, no displayColor → neutral gray.
@@ -3497,4 +3498,97 @@ fn root_basis_transform(stage: &Stage) -> Transform {
             ..Default::default()
         }
     }
+}
+
+// ── Material-variant preload (instant texture/material-variant switching) ──
+//
+// Composes the stage once per variant option, builds each mesh's bound
+// material per option, and keeps only the meshes whose material actually
+// differs across options (`ReadPreviewMaterial` compared). The viewer then
+// swaps `MeshMaterial3d` on those entities live — no scene rebuild.
+
+/// A material-affecting variant set with per-affected-mesh, per-option
+/// prebuilt `StandardMaterial` handles.
+#[derive(Debug, Clone)]
+pub struct MaterialVariantSet {
+    pub prim_path: String,
+    pub set_name: String,
+    pub current: String,
+    /// `(mesh prim path, option -> material handle)`, only for meshes whose
+    /// bound material changes across this set's options.
+    pub per_mesh: Vec<(String, HashMap<String, bevy::asset::Handle<StandardMaterial>>)>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn preload_material_variants(
+    base_stage: &Stage,
+    variants: &HashMap<String, Vec<crate::asset::VariantSet>>,
+    mut open_option: impl FnMut(&str, &str, &str) -> Option<Stage>,
+    lc: &mut LoadContext<'_>,
+    embedded: &HashMap<String, Vec<u8>>,
+    search_paths: &[std::path::PathBuf],
+    material_diffuse_overrides: &HashMap<String, String>,
+    kind_collapse: bool,
+    light_intensity_scale: f32,
+    curve_default_radius: f32,
+    curve_ring_segments: u32,
+    point_scale: f32,
+    skel_animations: &HashMap<String, crate::read::skel_anim_text::ReadSkelAnimText>,
+) -> Vec<MaterialVariantSet> {
+    let mut mesh_prims: Vec<String> = Vec::new();
+    let _ = base_stage.traverse(openusd::usd::PrimPredicate::default(), |p| {
+        if base_stage.prim_at(p.clone()).type_name().ok().flatten().as_deref() == Some("Mesh") {
+            mesh_prims.push(p.as_str().to_string());
+        }
+    });
+
+    let mut out = Vec::new();
+    for (prim_path, sets) in variants {
+        for set in sets {
+            if set.options.len() < 2 {
+                continue;
+            }
+            type Entry = (String, bevy::asset::Handle<StandardMaterial>, Option<crate::read::shade::ReadPreviewMaterial>);
+            let mut per_mesh: HashMap<String, Vec<Entry>> = HashMap::new();
+            for option in &set.options {
+                let Some(opt_stage) = open_option(prim_path, &set.name, option) else {
+                    continue;
+                };
+                let mut ctx = BuildCtx::new(
+                    lc, embedded, search_paths, material_diffuse_overrides, kind_collapse,
+                    light_intensity_scale, curve_default_radius, curve_ring_segments, point_scale, skel_animations,
+                );
+                let suffix = format!("@{}={}", set.name, option);
+                for mp in &mesh_prims {
+                    let Ok(mpath) = openusd::sdf::path(mp) else { continue };
+                    let Some(matp) = ushade::read_material_binding(&opt_stage, &mpath).ok().flatten() else {
+                        continue;
+                    };
+                    let read = ushade::read_preview_material(&opt_stage, &matp).ok().flatten();
+                    let handle = ctx.material_for(&opt_stage, &matp, false, &suffix);
+                    per_mesh.entry(mp.clone()).or_default().push((option.clone(), handle, read));
+                }
+            }
+            let mut set_out = MaterialVariantSet {
+                prim_path: prim_path.clone(),
+                set_name: set.name.clone(),
+                current: set.selection.clone().unwrap_or_default(),
+                per_mesh: Vec::new(),
+            };
+            for (mesh, entries) in per_mesh {
+                if entries.len() < 2 {
+                    continue;
+                }
+                let differs = entries.windows(2).any(|w| w[0].2 != w[1].2);
+                if differs {
+                    let opts = entries.into_iter().map(|(o, h, _)| (o, h)).collect();
+                    set_out.per_mesh.push((mesh, opts));
+                }
+            }
+            if !set_out.per_mesh.is_empty() {
+                out.push(set_out);
+            }
+        }
+    }
+    out
 }
