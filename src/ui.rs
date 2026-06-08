@@ -1142,6 +1142,7 @@ fn draw_variants_panel(
     usd_assets: Res<Assets<UsdAsset>>,
     mut loader_tuning: ResMut<LoaderTuning>,
     mut pending_anim: ResMut<PendingAnimationClip>,
+    mut pending_mat_variant: ResMut<crate::state::PendingMaterialVariant>,
     mut reload: ResMut<ReloadRequest>,
 ) {
     if !is_panel_open(&open, RIB_VARIANTS) {
@@ -1310,7 +1311,21 @@ fn draw_variants_panel(
                                                         loader_tuning
                                                             .variants
                                                             .insert(key.clone(), picked.clone());
-                                                        changed = true;
+                                                        let is_material =
+                                                            asset.material_variants.iter().any(|mv| {
+                                                                mv.prim_path == *prim_path
+                                                                    && mv.set_name == set.name
+                                                            });
+                                                        if is_material {
+                                                            // Live material swap, no rebuild.
+                                                            pending_mat_variant.queue.push((
+                                                                prim_path.clone(),
+                                                                set.name.clone(),
+                                                                picked,
+                                                            ));
+                                                        } else {
+                                                            changed = true;
+                                                        }
                                                     }
                                                 }
                                             });
