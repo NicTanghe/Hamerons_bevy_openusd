@@ -180,7 +180,7 @@ fn main() {
         )
         .add_systems(Update, apply_live_animation_clip)
         .add_systems(Update, apply_live_material_variant)
-        .add_systems(Update, (sync_loaded_stage_source, variant_reload_fallback));
+        .add_systems(Update, (sync_loaded_stage_source, variant_reload_fallback, warm_variants_on_load));
     let hide_meshes = std::env::var("BEVY_OPENUSD_HIDE_MESHES")
         .ok()
         .map(|v| matches!(v.as_str(), "1" | "true" | "on"))
@@ -1556,6 +1556,43 @@ fn apply_live_material_variant(
 
 /// Keep `LoadedStageSource` in sync with the requested asset + variant
 /// selections so the incremental updater can recompose on a variant switch.
+/// When a stage finishes loading, queue every variant option for background
+/// warm-up so the first click on any option is already cached → instant.
+fn warm_variants_on_load(
+    stage: Option<Res<StageHandle>>,
+    assets: Res<Assets<UsdAsset>>,
+    spawned: Res<Spawned>,
+    mut warm: ResMut<usd_bevy::incremental::WarmVariantsQueue>,
+    mut last: Local<Option<bevy::asset::AssetId<UsdAsset>>>,
+) {
+    if !spawned.0 {
+        return;
+    }
+    let Some(stage) = stage else {
+        return;
+    };
+    let id = stage.0.id();
+    if *last == Some(id) {
+        return;
+    }
+    let Some(asset) = assets.get(&stage.0) else {
+        return;
+    };
+    *last = Some(id);
+    warm.queue.clear();
+    for (prim, sets) in &asset.variants {
+        for set in sets {
+            if set.name == "anim" {
+                continue; // animation sets switch via their own live path
+            }
+            for option in &set.options {
+                warm.queue.push((prim.clone(), set.name.clone(), option.clone()));
+            }
+        }
+    }
+    info!("variant warm-up: queued {} options for background precompute", warm.queue.len());
+}
+
 fn sync_loaded_stage_source(
     requested: Res<RequestedAsset>,
     tuning: Res<LoaderTuning>,

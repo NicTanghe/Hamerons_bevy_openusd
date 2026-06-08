@@ -57,6 +57,14 @@ pub struct VariantReloadFallback(pub bool);
 struct MaterialVariantCache(HashMap<(String, String, String), Vec<(String, Handle<StandardMaterial>)>>);
 
 /// Registers the incremental-update resources + system.
+/// Every `(prim, set, option)` to precompute in the background after a load,
+/// so the user's first click on any option is already cached → instant. The
+/// viewer fills this when a stage finishes loading.
+#[derive(Resource, Default)]
+pub struct WarmVariantsQueue {
+    pub queue: Vec<(String, String, String)>,
+}
+
 pub struct IncrementalPlugin;
 
 impl Plugin for IncrementalPlugin {
@@ -64,14 +72,17 @@ impl Plugin for IncrementalPlugin {
         app.init_resource::<LoadedStageSource>()
             .init_resource::<PendingVariantSwitch>()
             .init_resource::<VariantReloadFallback>()
+            .init_resource::<WarmVariantsQueue>()
             .init_resource::<MaterialVariantCache>()
-            .add_systems(Update, apply_variant_switch);
+            .add_systems(Update, (apply_variant_switch, warm_variant_cache));
     }
 }
 
 type MeshMatQuery<'w, 's> =
     Query<'w, 's, (&'static UsdPrimRef, &'static Mesh3d, &'static mut MeshMaterial3d<StandardMaterial>)>;
 
+/// Apply queued variant switches to the live scene — cached options swap
+/// instantly; uncached ones compute once (recompose + build) then cache.
 fn apply_variant_switch(
     mut pending: ResMut<PendingVariantSwitch>,
     source: Res<LoadedStageSource>,
@@ -85,64 +96,101 @@ fn apply_variant_switch(
     if pending.queue.is_empty() {
         return;
     }
-    for (prim_path, set_name, option) in std::mem::take(&mut pending.queue) {
-        let key = (prim_path.clone(), set_name.clone(), option.clone());
-
-        // Cached → instant reassign, no recompose.
+    for (prim, set, option) in std::mem::take(&mut pending.queue) {
+        let key = (prim.clone(), set.clone(), option.clone());
         if let Some(per_mesh) = cache.0.get(&key).cloned() {
             reassign(&mut q, &per_mesh);
-            info!("variant: cached live-swap {prim_path} {set_name}={option}");
+            info!("variant: instant swap {prim} {set}={option}");
             continue;
         }
-
-        let Some(stage) = open_with_variant(&source) else {
-            warn!("variant: recompose failed for {set_name}={option}; falling back to reload");
-            fallback.0 = true;
-            continue;
-        };
-
-        // Read each live mesh's bound material in the recomposed stage, detect
-        // geometry change, and build the new material.
-        let search = [source.root.clone()];
-        let mut tex = AssetServerTextures {
-            asset_server: &asset_server,
-            search_paths: &search,
-        };
-        let mut per_mesh: Vec<(String, Handle<StandardMaterial>)> = Vec::new();
-        let mut geometry_changed = false;
-        for (pref, mesh3d, _) in q.iter() {
-            let Ok(ppath) = openusd::sdf::path(&pref.path) else {
-                continue;
-            };
-            // Geometry guard: if the mesh's vertex count changed, this isn't a
-            // pure material variant — bail to a full reload.
-            if let (Some(live), Ok(Some(rm))) =
-                (meshes.get(&mesh3d.0), ugeom::read_mesh(&stage, &ppath))
-                && rm.points.len() != live.count_vertices()
-            {
-                geometry_changed = true;
-                break;
+        let live = live_meshes(&q, &meshes);
+        match compute_option(&source, &prim, &set, &option, &live, &mut materials, &asset_server) {
+            Some(per_mesh) => {
+                reassign(&mut q, &per_mesh);
+                info!("variant: computed + swapped {prim} {set}={option} ({} meshes)", per_mesh.len());
+                cache.0.insert(key, per_mesh);
             }
-            let Ok(Some(mat_prim)) = ushade::read_material_binding(&stage, &ppath) else {
-                continue;
-            };
-            let Ok(Some(read)) = ushade::read_preview_material(&stage, &mat_prim) else {
-                continue;
-            };
-            let handle = materials.add(standard_material_from_usd(&mut tex, &read));
-            per_mesh.push((pref.path.clone(), handle));
+            None => {
+                warn!("variant: cannot live-swap {set}={option} (geometry change or read fail); reloading");
+                fallback.0 = true;
+            }
         }
+    }
+}
 
-        if geometry_changed {
-            warn!("variant: geometry changed for {set_name}={option}; falling back to reload");
-            fallback.0 = true;
-            continue;
-        }
-
-        reassign(&mut q, &per_mesh);
-        info!("variant: live-applied {prim_path} {set_name}={option} ({} meshes)", per_mesh.len());
+/// Background warm-up: precompute one queued option per frame so switching is
+/// instant by the time the user clicks. Skips already-cached options.
+fn warm_variant_cache(
+    mut warm: ResMut<WarmVariantsQueue>,
+    source: Res<LoadedStageSource>,
+    mut cache: ResMut<MaterialVariantCache>,
+    asset_server: Res<AssetServer>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    meshes: Res<Assets<bevy::mesh::Mesh>>,
+    q: Query<(&UsdPrimRef, &Mesh3d)>,
+) {
+    // One recompose per frame keeps the warm-up off the visible thread budget.
+    let Some((prim, set, option)) = warm.queue.pop() else {
+        return;
+    };
+    let key = (prim.clone(), set.clone(), option.clone());
+    if cache.0.contains_key(&key) {
+        return;
+    }
+    let live: Vec<(String, usize)> = q
+        .iter()
+        .map(|(pref, m)| (pref.path.clone(), meshes.get(&m.0).map_or(0, |mm| mm.count_vertices())))
+        .collect();
+    if let Some(per_mesh) = compute_option(&source, &prim, &set, &option, &live, &mut materials, &asset_server) {
         cache.0.insert(key, per_mesh);
     }
+}
+
+fn live_meshes(q: &MeshMatQuery, meshes: &Assets<bevy::mesh::Mesh>) -> Vec<(String, usize)> {
+    q.iter()
+        .map(|(pref, m, _)| (pref.path.clone(), meshes.get(&m.0).map_or(0, |mm| mm.count_vertices())))
+        .collect()
+}
+
+/// Recompose with `option` selected for `(prim, set)` (other sets keep their
+/// current selection), then build each mesh's bound material. Returns `None`
+/// if the recompose fails or the variant changes geometry (caller reloads).
+fn compute_option(
+    source: &LoadedStageSource,
+    prim: &str,
+    set: &str,
+    option: &str,
+    live_meshes: &[(String, usize)],
+    materials: &mut Assets<StandardMaterial>,
+    asset_server: &AssetServer,
+) -> Option<Vec<(String, Handle<StandardMaterial>)>> {
+    let stage = open_with_variant(source, prim, set, option)?;
+    let search = [source.root.clone()];
+    let mut tex = AssetServerTextures {
+        asset_server,
+        search_paths: &search,
+    };
+    let mut per_mesh = Vec::new();
+    for (path, live_vcount) in live_meshes {
+        let Ok(ppath) = openusd::sdf::path(path) else {
+            continue;
+        };
+        if let Ok(Some(rm)) = ugeom::read_mesh(&stage, &ppath)
+            && *live_vcount != 0
+            && rm.points.len() != *live_vcount
+        {
+            return None; // geometry changed — not a pure material variant
+        }
+        let Ok(Some(mat_prim)) = ushade::read_material_binding(&stage, &ppath) else {
+            continue;
+        };
+        let Ok(Some(read)) = ushade::read_preview_material(&stage, &mat_prim) else {
+            continue;
+        };
+        let handle = materials.add(standard_material_from_usd(&mut tex, &read));
+        per_mesh.push((path.clone(), handle));
+    }
+    Some(per_mesh)
 }
 
 fn reassign(q: &mut MeshMatQuery, per_mesh: &[(String, Handle<StandardMaterial>)]) {
@@ -155,10 +203,21 @@ fn reassign(q: &mut MeshMatQuery, per_mesh: &[(String, Handle<StandardMaterial>)
     }
 }
 
-/// Recompose the source layer with the current variant selections via a
+/// Recompose the source layer with `option` selected for `(prim, set)` via a
 /// session layer (openusd directly — no Bevy AssetServer needed for the stage).
-fn open_with_variant(source: &LoadedStageSource) -> Option<openusd::usd::Stage> {
-    let text = author_variant_session_layer(&source.base_variants);
+fn open_with_variant(source: &LoadedStageSource, prim: &str, set: &str, option: &str) -> Option<openusd::usd::Stage> {
+    let mut sels: Vec<VariantSelection> = source
+        .base_variants
+        .iter()
+        .filter(|v| !(v.prim_path.as_str() == prim && v.set_name.as_str() == set))
+        .cloned()
+        .collect();
+    sels.push(VariantSelection {
+        prim_path: prim.to_string(),
+        set_name: set.to_string(),
+        option: option.to_string(),
+    });
+    let text = author_variant_session_layer(&sels);
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     text.hash(&mut hasher);
     source.source.hash(&mut hasher);
