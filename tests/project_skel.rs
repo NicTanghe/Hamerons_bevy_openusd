@@ -20,6 +20,7 @@ fn build_test_app() -> App {
         .init_asset::<Scene>()
         .init_asset::<Mesh>()
         .init_asset::<StandardMaterial>()
+        .init_asset::<bevy::mesh::skinning::SkinnedMeshInverseBindposes>()
         .add_plugins(bevy::scene::ScenePlugin)
         .add_plugins(UsdPlugin)
         .register_type::<Mesh3d>()

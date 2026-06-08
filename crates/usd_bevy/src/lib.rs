@@ -52,14 +52,6 @@ impl Plugin for UsdPlugin {
     fn build(&self, app: &mut App) {
         app.init_asset::<Scene>()
             .init_asset::<UsdAsset>()
-            // Asset types the loader produces as labeled sub-assets / deps.
-            // `init_asset` is idempotent, so this is harmless when the render
-            // plugins already registered them — and makes the plugin
-            // self-contained for headless / minimal Apps (tests, tooling).
-            .init_asset::<bevy::mesh::Mesh>()
-            .init_asset::<bevy::pbr::StandardMaterial>()
-            .init_asset::<bevy::image::Image>()
-            .init_asset::<bevy::mesh::skinning::SkinnedMeshInverseBindposes>()
             .init_asset_loader::<UsdLoader>()
             .register_type::<UsdPrimRef>()
             .register_type::<UsdLocalExtent>()
