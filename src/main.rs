@@ -925,8 +925,12 @@ fn handle_usd_hot_reload(
             variant_selections.len()
         );
         let handle: Handle<UsdAsset> = asset_server.load_with_settings::<UsdAsset, _>(
-            // Relative asset name so Bevy's asset-root gate accepts it.
-            variant_basename.clone(),
+            // Absolute path to the variant-keyed copy. The copy sits next to
+            // the source (which may be outside the startup asset root), so load
+            // it by absolute path — `AssetPlugin.unapproved_path_mode = Allow`
+            // permits that. (A bare basename would resolve against the fixed
+            // asset root and miss when the source is in a subdir.)
+            variant_fs_path.to_string_lossy().into_owned(),
             move |s: &mut UsdLoaderSettings| {
                 s.search_paths = search.clone();
                 s.kind_collapse = kind_collapse;
