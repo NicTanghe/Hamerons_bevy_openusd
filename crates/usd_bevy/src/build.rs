@@ -660,7 +660,7 @@ fn mdl_emission_explicitly_disabled(stage: &Stage, material_prim: &Path) -> bool
             continue;
         };
         let is_shader = stage
-            .field::<String>(shader.clone(), "typeName")
+            .prim_at(shader.clone()).type_name()
             .ok()
             .flatten()
             .as_deref()
@@ -679,7 +679,7 @@ fn read_bool_input(stage: &Stage, prim: &Path, attr_name: &str) -> Option<bool> 
     use openusd::sdf::Value;
 
     let attr = prim.append_property(attr_name).ok()?;
-    match stage.field::<Value>(attr, "default").ok().flatten()? {
+    match crate::read::util::default_at(stage, &attr).ok().flatten()? {
         Value::Bool(v) => Some(v),
         _ => None,
     }
@@ -1046,7 +1046,7 @@ fn spawn_prim_subtree(
 /// boundaries typically land.
 fn kind_is_collapsible(stage: &Stage, path: &Path) -> bool {
     stage
-        .field::<String>(path.clone(), "kind")
+        .prim_at(path.clone()).kind()
         .ok()
         .flatten()
         .map(|k| matches!(k.as_str(), "component" | "subcomponent"))
@@ -1096,7 +1096,7 @@ fn collect_geoms_for_collapse(
 fn prim_has_geometry(stage: &Stage, path: &Path) -> bool {
     matches!(
         stage
-            .field::<String>(path.clone(), "typeName")
+            .prim_at(path.clone()).type_name()
             .ok()
             .flatten()
             .as_deref(),
@@ -1802,7 +1802,7 @@ fn read_geom_bind_transform(stage: &Stage, prim: &Path) -> Option<bevy::math::Ma
     let attr = prim
         .append_property("primvars:skel:geomBindTransform")
         .ok()?;
-    let v = stage.field::<Value>(attr, "default").ok().flatten()?;
+    let v = crate::read::util::default_at(stage, &attr).ok().flatten()?;
     match v {
         Value::Matrix4d(m) => {
             let arr: [f32; 16] = std::array::from_fn(|i| m[i] as f32);
@@ -2133,7 +2133,7 @@ fn find_first_typed_descendant(stage: &Stage, root: &Path, target_type: &str) ->
 /// fall through and aren't double-walked.
 fn is_root_physics_prim(stage: &Stage, prim: &Path) -> bool {
     let type_name: String = stage
-        .field::<String>(prim.clone(), "typeName")
+        .prim_at(prim.clone()).type_name()
         .ok()
         .flatten()
         .unwrap_or_default();
@@ -2167,7 +2167,7 @@ fn attach_geometry(
     ctx: &mut BuildCtx<'_, '_>,
 ) {
     let type_name: Option<String> = stage
-        .field::<String>(path.clone(), "typeName")
+        .prim_at(path.clone()).type_name()
         .ok()
         .flatten();
     let Some(type_name) = type_name else {
@@ -2795,7 +2795,7 @@ fn prototype_fingerprint(stage: &Stage, path: &Path) -> String {
     let mut h = DefaultHasher::new();
     // Root's typeName only (skip leaf name — that's site-specific).
     let root_type = stage
-        .field::<String>(path.clone(), "typeName")
+        .prim_at(path.clone()).type_name()
         .ok()
         .flatten()
         .unwrap_or_default();
@@ -2815,7 +2815,7 @@ fn prototype_fingerprint(stage: &Stage, path: &Path) -> String {
             };
             name.hash(h);
             let type_name = stage
-                .field::<String>(child.clone(), "typeName")
+                .prim_at(child.clone()).type_name()
                 .ok()
                 .flatten()
                 .unwrap_or_default();
@@ -2922,7 +2922,7 @@ fn is_replayable_type(type_name: Option<&str>) -> bool {
 
 fn type_name_of(stage: &Stage, prim: &Path) -> Option<String> {
     stage
-        .field::<String>(prim.clone(), "typeName")
+        .prim_at(prim.clone()).type_name()
         .ok()
         .flatten()
 }
@@ -3069,7 +3069,7 @@ fn resolve_mesh_and_material(
     bevy::asset::Handle<StandardMaterial>,
 )> {
     let type_name: String = stage
-        .field::<String>(proto_path.clone(), "typeName")
+        .prim_at(proto_path.clone()).type_name()
         .ok()
         .flatten()
         .unwrap_or_default();
@@ -3231,7 +3231,7 @@ fn first_renderable_descendant(stage: &Stage, root: &Path) -> Option<Path> {
             continue;
         };
         let tn: String = stage
-            .field::<String>(child_path.clone(), "typeName")
+            .prim_at(child_path.clone()).type_name()
             .ok()
             .flatten()
             .unwrap_or_default();
@@ -3351,7 +3351,7 @@ fn resolve_material_prim(stage: &Stage, bound_prim: &Path, material_prim: &Path)
 
 fn prim_type_is(stage: &Stage, prim: &Path, expected: &str) -> bool {
     stage
-        .field::<String>(prim.clone(), "typeName")
+        .prim_at(prim.clone()).type_name()
         .ok()
         .flatten()
         .as_deref()

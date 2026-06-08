@@ -861,7 +861,7 @@ fn collect_curves_and_points(
     let mut points = HashMap::new();
     let _ = stage.traverse(|path: &Path| {
         let type_name: Option<String> = stage
-            .field::<String>(path.clone(), "typeName")
+            .prim_at(path.clone()).type_name()
             .ok()
             .flatten();
         match type_name.as_deref() {
@@ -988,7 +988,7 @@ fn collect_subdivision_prims(
     let mut out = Vec::new();
     let _ = stage.traverse(|path: &Path| {
         let type_name: Option<String> = stage
-            .field::<String>(path.clone(), "typeName")
+            .prim_at(path.clone()).type_name()
             .ok()
             .flatten();
         if type_name.as_deref() != Some("Mesh") {
