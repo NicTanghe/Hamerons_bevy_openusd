@@ -71,6 +71,9 @@ fn main() {
             })
             .set(bevy::asset::AssetPlugin {
                 file_path: asset_root.to_string_lossy().into_owned(),
+                // Allow loading absolute paths outside the asset root so Browse
+                // can open a file in any directory in-place (no process relaunch).
+                unapproved_path_mode: bevy::asset::UnapprovedPathMode::Allow,
                 ..Default::default()
             })
             .set(bevy::log::LogPlugin {
@@ -1024,34 +1027,69 @@ fn spawn_when_ready(
 /// `argv[1]` in `resolve_requested_asset`, sets the AssetPlugin's
 /// `file_path` to the picked file's parent before the App is built,
 /// and loads cleanly.
-fn apply_load_request(mut req: ResMut<LoadRequest>) {
+/// Browse → load the picked USD **in place**: despawn the current scene,
+/// re-point `RequestedAsset` at the new (absolute) path, and re-run the asset
+/// load. No process relaunch — `AssetPlugin.unapproved_path_mode = Allow` lets
+/// the AssetServer read an absolute path outside the startup asset root.
+#[allow(clippy::too_many_arguments)]
+fn apply_load_request(
+    mut req: ResMut<LoadRequest>,
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut requested: ResMut<RequestedAsset>,
+    mut spawned: ResMut<Spawned>,
+    mut info: ResMut<StageInfo>,
+    tuning: Res<LoaderTuning>,
+    scene_roots: Query<Entity, With<SceneRoot>>,
+) {
     let Some(new_path) = req.path.take() else {
         return;
     };
-
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            error!("Browse: cannot resolve current_exe to re-launch: {e}");
-            return;
-        }
+    let abs = if new_path.is_absolute() {
+        new_path
+    } else {
+        std::env::current_dir()
+            .map(|d| d.join(&new_path))
+            .unwrap_or(new_path)
     };
+    let root = abs
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| requested.root.clone());
+    let name = abs.to_string_lossy().into_owned();
+    info!("Browse: loading {} in place", abs.display());
 
-    info!(
-        "Browse: re-launching {} with {}",
-        exe.display(),
-        new_path.display()
-    );
-
-    match std::process::Command::new(&exe).arg(&new_path).spawn() {
-        Ok(_) => {
-            // New viewer is up; exit cleanly so we don't sit alongside it.
-            std::process::exit(0);
-        }
-        Err(e) => {
-            error!("Browse: failed to spawn new viewer process: {e}");
-        }
+    // Tear down the current scene; `spawn_when_ready` rebuilds from the new
+    // asset once it finishes loading.
+    for entity in &scene_roots {
+        commands.entity(entity).despawn();
     }
+
+    requested.name = name.clone();
+    requested.root = root.clone();
+    info.path = name.clone();
+
+    let search = vec![root];
+    let kind_collapse = std::env::var("BEVY_OPENUSD_KIND_COLLAPSE")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "on"))
+        .unwrap_or(false);
+    let curve_radius = tuning.curves.default_radius;
+    let curve_rings = tuning.curves.ring_segments;
+    let point_scale = tuning.curves.point_scale;
+    let variant_selections = tuning.to_variant_selections();
+    let handle: Handle<UsdAsset> = asset_server.load_with_settings::<UsdAsset, _>(
+        name,
+        move |s: &mut UsdLoaderSettings| {
+            s.search_paths = search.clone();
+            s.kind_collapse = kind_collapse;
+            s.curve_default_radius = curve_radius;
+            s.curve_ring_segments = curve_rings;
+            s.point_scale = point_scale;
+            s.variant_selections = variant_selections.clone();
+        },
+    );
+    commands.insert_resource(StageHandle(handle));
+    spawned.0 = false;
 }
 
 /// Lerp the arcball's focus + distance toward the last-requested
