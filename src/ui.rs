@@ -1,14 +1,11 @@
-//! Viewer UI — mara ribbons + rail-anchored panes + widgets.
+//! Viewer UI — pure mara: ribbons + rail-anchored panes + declarative
+//! `Pod` containers. No raw egui, no legacy widgets — every panel is
+//! built with `body.add_normal(...)` + `Pod` builders, and interactions
+//! are read back from `body.render()`'s `PodResponse` map.
 //!
-//! Left rail is one `ThreeSided` panel ribbon. Primary tools live in
-//! the `Start` cluster (top), the play toggle in `Middle`, utility/help
-//! in `End` (bottom). Panel visibility is driven by mara's `RibbonOpen`
-//! resource — clicking a rail button toggles its pane exclusively
-//! (one open pane per ribbon).
-//!
-//! Each pane body paints imperatively via `body.ui()` (mara's
-//! immediate escape hatch) using mara_core widgets, so the panel code
-//! reads like the old bevy_frost version.
+//! Left rail is one `ThreeSided` panel ribbon. Primary tools in the
+//! `Start` cluster, the play toggle in `Middle`, utility/help in `End`.
+//! `RibbonOpen` drives pane visibility (one open pane per ribbon).
 
 use bevy::asset::Assets;
 use bevy::ecs::hierarchy::Children;
@@ -18,6 +15,7 @@ use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
 use bevy_mara::prelude::*;
 use mara_core::pane::{Pane, PaneAnchor, PaneResize, RailZone};
+use mara_core::pod::{Pod, PodResponse, TagItem};
 use mara_core::ribbon::{
     RibbonAction, RibbonCluster, RibbonDrag, RibbonEdge, RibbonGlyph, RibbonMode, RibbonOpen,
     RibbonPlacement, RibbonRole, RibbonSlotClick, RibbonSlotItem, ResolvedSlotRibbon,
@@ -25,15 +23,9 @@ use mara_core::ribbon::{
 };
 use mara_core::style;
 use mara_core::style::AccentColor;
-use mara_core::widget::section;
-use mara_core::widget::{
-    TreeIconKind, TreeIconSlot, badge_row, chip, chip_colored, context_menu_mara,
-    hybrid_select_row, keybinding_row, labelled_row, pretty_slider, readout_row, row_separator,
-    search_field, sub_caption, toggle, tree_row, wide_button,
-};
+use mara_core::widget::{TreeIconKind, TreeIconSlot};
 use mara_core::{CommandPaletteState, PaletteItem, command_palette};
-use std::collections::HashMap;
-use std::hash::Hash;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use usd_bevy::{UsdAsset, UsdDisplayName, UsdKind, UsdPrimRef, UsdProcedural, UsdSpatialAudio};
 
@@ -60,7 +52,6 @@ pub const RIB_KEYS: &str = "viewer_keys";
 pub const RIB_LOG: &str = "viewer_log";
 pub const RIB_PLAY: &str = "viewer_play";
 
-/// A ribbon rail (mara `ResolvedSlotRibbon`s are built from this per frame).
 #[derive(Clone, Copy)]
 struct RibbonSpec {
     id: &'static str,
@@ -70,20 +61,13 @@ struct RibbonSpec {
     accepts: &'static [&'static str],
 }
 
-/// A ribbon button (a pane toggle, or an `Icon`-role action).
 #[derive(Clone, Copy)]
 struct RibbonButtonSpec {
     id: &'static str,
     ribbon: &'static str,
     cluster: RibbonCluster,
-    // Documents intended order within a cluster; mara paints in
-    // declaration order, so this isn't read at runtime.
-    #[allow(dead_code)]
-    slot: u32,
-    draggable: bool,
     glyph: RibbonGlyph,
     tooltip: &'static str,
-    child_ribbon: Option<&'static str>,
     role: Option<RibbonRole>,
 }
 
@@ -96,223 +80,43 @@ const RIBBONS: &[RibbonSpec] = &[RibbonSpec {
 }];
 
 const RIBBON_ITEMS: &[RibbonButtonSpec] = &[
-    RibbonButtonSpec {
-        id: RIB_SELECTION,
-        ribbon: RIBBON_LEFT,
-        cluster: RibbonCluster::Start,
-        slot: 0,
-        draggable: false,
-        glyph: RibbonGlyph::Icon("cursor"),
-        tooltip: "File / selection",
-        child_ribbon: None,
-        role: None,
-    },
-    RibbonButtonSpec {
-        id: RIB_TREE,
-        ribbon: RIBBON_LEFT,
-        cluster: RibbonCluster::Start,
-        slot: 1,
-        draggable: false,
-        glyph: RibbonGlyph::Icon("folder"),
-        tooltip: "Prim tree (T)",
-        child_ribbon: None,
-        role: None,
-    },
-    RibbonButtonSpec {
-        id: RIB_INFO,
-        ribbon: RIBBON_LEFT,
-        cluster: RibbonCluster::Start,
-        slot: 2,
-        draggable: false,
-        glyph: RibbonGlyph::Icon("document"),
-        tooltip: "Stage info (I)",
-        child_ribbon: None,
-        role: None,
-    },
-    RibbonButtonSpec {
-        id: RIB_VARIANTS,
-        ribbon: RIBBON_LEFT,
-        cluster: RibbonCluster::Start,
-        slot: 3,
-        draggable: false,
-        glyph: RibbonGlyph::Icon("options"),
-        tooltip: "Variants",
-        child_ribbon: None,
-        role: None,
-    },
-    RibbonButtonSpec {
-        id: RIB_CAMERAS,
-        ribbon: RIBBON_LEFT,
-        cluster: RibbonCluster::Start,
-        slot: 4,
-        draggable: false,
-        glyph: RibbonGlyph::Icon("cube"),
-        tooltip: "Cameras",
-        child_ribbon: None,
-        role: None,
-    },
-    RibbonButtonSpec {
-        id: RIB_MATERIALS,
-        ribbon: RIBBON_LEFT,
-        cluster: RibbonCluster::Start,
-        slot: 5,
-        draggable: false,
-        glyph: RibbonGlyph::Icon("color"),
-        tooltip: "Materials",
-        child_ribbon: None,
-        role: None,
-    },
-    RibbonButtonSpec {
-        id: RIB_PLAY,
-        ribbon: RIBBON_LEFT,
-        cluster: RibbonCluster::Middle,
-        slot: 0,
-        draggable: false,
-        glyph: RibbonGlyph::Icon("play"),
-        tooltip: "Play / pause physics",
-        child_ribbon: None,
-        role: Some(RibbonRole::Icon),
-    },
-    RibbonButtonSpec {
-        id: RIB_OVERLAYS,
-        ribbon: RIBBON_LEFT,
-        cluster: RibbonCluster::End,
-        slot: 0,
-        draggable: false,
-        glyph: RibbonGlyph::Icon("square-multiple"),
-        tooltip: "Overlays (O)",
-        child_ribbon: None,
-        role: None,
-    },
-    RibbonButtonSpec {
-        id: RIB_TIMELINE,
-        ribbon: RIBBON_LEFT,
-        cluster: RibbonCluster::End,
-        slot: 1,
-        draggable: false,
-        glyph: RibbonGlyph::Icon("clock"),
-        tooltip: "Timeline",
-        child_ribbon: None,
-        role: None,
-    },
-    RibbonButtonSpec {
-        id: RIB_KEYS,
-        ribbon: RIBBON_LEFT,
-        cluster: RibbonCluster::End,
-        slot: 2,
-        draggable: false,
-        glyph: RibbonGlyph::Icon("keyboard"),
-        tooltip: "Controls (?)",
-        child_ribbon: None,
-        role: None,
-    },
-    RibbonButtonSpec {
-        id: RIB_LOG,
-        ribbon: RIBBON_LEFT,
-        cluster: RibbonCluster::End,
-        slot: 3,
-        draggable: false,
-        glyph: RibbonGlyph::Icon("list"),
-        tooltip: "Log",
-        child_ribbon: None,
-        role: None,
-    },
+    RibbonButtonSpec { id: RIB_SELECTION, ribbon: RIBBON_LEFT, cluster: RibbonCluster::Start, glyph: RibbonGlyph::Icon("cursor"), tooltip: "File / selection", role: None },
+    RibbonButtonSpec { id: RIB_TREE, ribbon: RIBBON_LEFT, cluster: RibbonCluster::Start, glyph: RibbonGlyph::Icon("folder"), tooltip: "Prim tree (T)", role: None },
+    RibbonButtonSpec { id: RIB_INFO, ribbon: RIBBON_LEFT, cluster: RibbonCluster::Start, glyph: RibbonGlyph::Icon("document"), tooltip: "Stage info (I)", role: None },
+    RibbonButtonSpec { id: RIB_VARIANTS, ribbon: RIBBON_LEFT, cluster: RibbonCluster::Start, glyph: RibbonGlyph::Icon("options"), tooltip: "Variants", role: None },
+    RibbonButtonSpec { id: RIB_CAMERAS, ribbon: RIBBON_LEFT, cluster: RibbonCluster::Start, glyph: RibbonGlyph::Icon("cube"), tooltip: "Cameras", role: None },
+    RibbonButtonSpec { id: RIB_MATERIALS, ribbon: RIBBON_LEFT, cluster: RibbonCluster::Start, glyph: RibbonGlyph::Icon("color"), tooltip: "Materials", role: None },
+    RibbonButtonSpec { id: RIB_PLAY, ribbon: RIBBON_LEFT, cluster: RibbonCluster::Middle, glyph: RibbonGlyph::Icon("play"), tooltip: "Play / pause physics", role: Some(RibbonRole::Icon) },
+    RibbonButtonSpec { id: RIB_OVERLAYS, ribbon: RIBBON_LEFT, cluster: RibbonCluster::End, glyph: RibbonGlyph::Icon("square-multiple"), tooltip: "Overlays (O)", role: None },
+    RibbonButtonSpec { id: RIB_TIMELINE, ribbon: RIBBON_LEFT, cluster: RibbonCluster::End, glyph: RibbonGlyph::Icon("clock"), tooltip: "Timeline", role: None },
+    RibbonButtonSpec { id: RIB_KEYS, ribbon: RIBBON_LEFT, cluster: RibbonCluster::End, glyph: RibbonGlyph::Icon("keyboard"), tooltip: "Controls (?)", role: None },
+    RibbonButtonSpec { id: RIB_LOG, ribbon: RIBBON_LEFT, cluster: RibbonCluster::End, glyph: RibbonGlyph::Icon("list"), tooltip: "Log", role: None },
 ];
 
-/// Prim-tree expansion state, keyed by `UsdPrimRef.path`. Entries
-/// default to expanded the first time a row is rendered.
-#[derive(Resource, Default)]
-pub struct TreeExpanded(pub HashMap<String, bool>);
-
-/// Free-text filter for the prim-tree panel. When non-empty, the
-/// panel switches to a flat-list mode showing every prim whose path
-/// contains the substring (case-insensitive).
+/// Free-text filter for the prim-tree panel.
 #[derive(Resource, Default)]
 pub struct TreeFilter(pub String);
 
-/// Wrapper around mara's `CommandPaletteState` so Bevy can track it
-/// as a Resource without needing to derive on an upstream type.
+/// Wrapper around mara's `CommandPaletteState`.
 #[derive(Resource, Default)]
 pub struct ViewerCommandPalette(pub CommandPaletteState);
 
-/// The palette's static action list. Adding a new id here only
-/// requires a matching arm in the dispatch below.
 const PALETTE_ITEMS: &[PaletteItem] = &[
-    PaletteItem {
-        id: "open_selection",
-        label: "Open: Selection panel",
-        hint: Some("F"),
-    },
-    PaletteItem {
-        id: "open_tree",
-        label: "Open: Prim tree",
-        hint: Some("T"),
-    },
-    PaletteItem {
-        id: "open_info",
-        label: "Open: Stage info",
-        hint: Some("I"),
-    },
-    PaletteItem {
-        id: "open_variants",
-        label: "Open: Variants",
-        hint: None,
-    },
-    PaletteItem {
-        id: "open_cameras",
-        label: "Open: Cameras",
-        hint: None,
-    },
-    PaletteItem {
-        id: "open_overlays",
-        label: "Open: Overlays",
-        hint: Some("O"),
-    },
-    PaletteItem {
-        id: "open_timeline",
-        label: "Open: Timeline",
-        hint: None,
-    },
-    PaletteItem {
-        id: "open_keys",
-        label: "Open: Controls",
-        hint: Some("?"),
-    },
-    PaletteItem {
-        id: "open_log",
-        label: "Open: Log",
-        hint: None,
-    },
-    PaletteItem {
-        id: "toggle_grid",
-        label: "Toggle: Ground grid",
-        hint: Some("G"),
-    },
-    PaletteItem {
-        id: "toggle_axes",
-        label: "Toggle: World axes",
-        hint: Some("X"),
-    },
-    PaletteItem {
-        id: "toggle_markers",
-        label: "Toggle: Prim markers",
-        hint: Some("P"),
-    },
-    PaletteItem {
-        id: "toggle_wireframe",
-        label: "Toggle: Wireframe",
-        hint: None,
-    },
-    PaletteItem {
-        id: "reload_stage",
-        label: "Stage: Reload",
-        hint: Some("R"),
-    },
-    PaletteItem {
-        id: "browse_usd",
-        label: "Stage: Browse for USD…",
-        hint: None,
-    },
+    PaletteItem { id: "open_selection", label: "Open: Selection panel", hint: Some("F") },
+    PaletteItem { id: "open_tree", label: "Open: Prim tree", hint: Some("T") },
+    PaletteItem { id: "open_info", label: "Open: Stage info", hint: Some("I") },
+    PaletteItem { id: "open_variants", label: "Open: Variants", hint: None },
+    PaletteItem { id: "open_cameras", label: "Open: Cameras", hint: None },
+    PaletteItem { id: "open_overlays", label: "Open: Overlays", hint: Some("O") },
+    PaletteItem { id: "open_timeline", label: "Open: Timeline", hint: None },
+    PaletteItem { id: "open_keys", label: "Open: Controls", hint: Some("?") },
+    PaletteItem { id: "open_log", label: "Open: Log", hint: None },
+    PaletteItem { id: "toggle_grid", label: "Toggle: Ground grid", hint: Some("G") },
+    PaletteItem { id: "toggle_axes", label: "Toggle: World axes", hint: Some("X") },
+    PaletteItem { id: "toggle_markers", label: "Toggle: Prim markers", hint: Some("P") },
+    PaletteItem { id: "toggle_wireframe", label: "Toggle: Wireframe", hint: None },
+    PaletteItem { id: "reload_stage", label: "Stage: Reload", hint: Some("R") },
+    PaletteItem { id: "browse_usd", label: "Stage: Browse for USD…", hint: None },
 ];
 
 // ─── Ribbon helpers ─────────────────────────────────────────────────
@@ -321,8 +125,6 @@ fn ribbon_action(id: &'static str) -> RibbonAction {
     RibbonAction::Command(egui::Id::new(id))
 }
 
-/// Rail-anchor for a pane, derived from its ribbon button's cluster.
-/// All viewer panes live on the left rail.
 fn pane_anchor_for(item_id: &'static str) -> PaneAnchor {
     let zone = RIBBON_ITEMS
         .iter()
@@ -336,50 +138,32 @@ fn pane_anchor_for(item_id: &'static str) -> PaneAnchor {
     PaneAnchor::LeftRail(zone)
 }
 
-/// Build mara `ResolvedSlotRibbon`s from the static specs and paint
-/// them. Panel-role buttons toggle their pane's `RibbonOpen` state
-/// internally; `Icon`-role buttons (play) surface as clicks.
 fn draw_unified_ribbons(
     ctx: &egui::Context,
     accent: egui::Color32,
-    ribbons: &[RibbonSpec],
-    items: &[RibbonButtonSpec],
     open: &mut RibbonOpen,
     placement: &mut RibbonPlacement,
     drag: &mut RibbonDrag,
     active: impl Fn(&'static str) -> bool,
 ) -> Vec<RibbonSlotClick> {
     let mut resolved = Vec::new();
-    for ribbon in ribbons {
-        for cluster in [
-            RibbonCluster::Start,
-            RibbonCluster::Middle,
-            RibbonCluster::End,
-        ] {
-            let slot_items: Vec<RibbonSlotItem> = items
+    for ribbon in RIBBONS {
+        for cluster in [RibbonCluster::Start, RibbonCluster::Middle, RibbonCluster::End] {
+            let items: Vec<RibbonSlotItem> = RIBBON_ITEMS
                 .iter()
                 .filter(|item| item.ribbon == ribbon.id && item.cluster == cluster)
                 .map(|item| {
                     let icon = match item.glyph {
                         RibbonGlyph::Icon(i) | RibbonGlyph::Text(i) | RibbonGlyph::Svg(i) => i,
                     };
-                    let mut slot = RibbonSlotItem::featureful(
-                        item.id,
-                        icon,
-                        item.id,
-                        item.tooltip,
-                        ribbon_action(item.id),
-                    )
-                    .with_role(item.role.unwrap_or(ribbon.role));
-                    if let Some(child) = item.child_ribbon {
-                        slot = slot.with_child_ribbon(child);
-                    }
-                    slot.draggable = item.draggable;
+                    let mut slot =
+                        RibbonSlotItem::featureful(item.id, icon, item.id, item.tooltip, ribbon_action(item.id))
+                            .with_role(item.role.unwrap_or(ribbon.role));
                     slot.active = active(item.id);
                     slot
                 })
                 .collect();
-            if slot_items.is_empty() {
+            if items.is_empty() {
                 continue;
             }
             resolved.push(ResolvedSlotRibbon {
@@ -391,11 +175,26 @@ fn draw_unified_ribbons(
                 mode: ribbon.mode,
                 cluster,
                 accepts: ribbon.accepts,
-                items: slot_items,
+                items,
             });
         }
     }
     draw_slot_ribbons_featureful(ctx, accent, &resolved, open, placement, drag)
+}
+
+// ─── Pod-response read helpers ──────────────────────────────────────
+
+type RespMap = HashMap<egui::Id, Vec<PodResponse>>;
+
+fn pod<'a>(r: &'a RespMap, container: egui::Id, idx: usize) -> Option<&'a PodResponse> {
+    r.get(&container).and_then(|v| v.get(idx))
+}
+
+fn cid(suffix: &str) -> egui::Id {
+    egui::Id::new(("usdview_pane", suffix))
+}
+fn pid(container: &str, idx: usize) -> egui::Id {
+    egui::Id::new(("usdview_pod", container, idx))
 }
 
 // ─── Plugin ─────────────────────────────────────────────────────────
@@ -407,17 +206,11 @@ impl Plugin for ViewerUiPlugin {
         if !app.is_plugin_added::<MaraPlugin>() {
             app.add_plugins(MaraPlugin);
         }
-        app.init_resource::<TreeExpanded>()
-            .init_resource::<TreeFilter>()
+        app.init_resource::<TreeFilter>()
             .init_resource::<ViewerCommandPalette>()
             .add_systems(
                 EguiPrimaryContextPass,
                 (
-                    // Publish pane-button ids first (Pane::show needs
-                    // them); panes paint next; the ribbon assembly
-                    // registers last so its `Area`s layer above the
-                    // panes. Click handling updates `RibbonOpen` for the
-                    // next frame.
                     publish_pane_ids,
                     draw_selection_panel,
                     draw_tree_panel,
@@ -438,40 +231,6 @@ impl Plugin for ViewerUiPlugin {
     }
 }
 
-// ─── Ribbon rail ────────────────────────────────────────────────────
-
-fn draw_ribbons(
-    mut contexts: EguiContexts,
-    accent: Res<AccentColor>,
-    mut open: ResMut<RibbonOpen>,
-    mut placement: ResMut<RibbonPlacement>,
-    mut drag: ResMut<RibbonDrag>,
-    mut physics: ResMut<usd_bevy::physics::PhysicsActive>,
-) {
-    let Ok(ctx) = contexts.ctx_mut() else {
-        return;
-    };
-    let physics_on = physics.0;
-    let clicks = draw_unified_ribbons(
-        ctx,
-        accent.0,
-        RIBBONS,
-        RIBBON_ITEMS,
-        &mut open,
-        &mut placement,
-        &mut drag,
-        |id| id == RIB_PLAY && physics_on,
-    );
-    for click in clicks {
-        if click.item == egui::Id::new(RIB_PLAY) {
-            physics.0 = !physics.0;
-        }
-    }
-}
-
-/// mara's `Pane::show` requires the set of ribbon pane-button ids to be
-/// published each frame (it uses them to lay out the rails). Runs before
-/// any pane so the geometry is ready.
 fn publish_pane_ids(mut contexts: EguiContexts) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
@@ -486,6 +245,30 @@ fn publish_pane_ids(mut contexts: EguiContexts) {
 
 fn is_panel_open(open: &RibbonOpen, item: &'static str) -> bool {
     open.is_open(RIBBON_LEFT, item)
+}
+
+// ─── Ribbon rail ────────────────────────────────────────────────────
+
+fn draw_ribbons(
+    mut contexts: EguiContexts,
+    accent: Res<AccentColor>,
+    mut open: ResMut<RibbonOpen>,
+    mut placement: ResMut<RibbonPlacement>,
+    mut drag: ResMut<RibbonDrag>,
+    mut physics: ResMut<usd_bevy::physics::PhysicsActive>,
+) {
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+    let physics_on = physics.0;
+    let clicks = draw_unified_ribbons(ctx, accent.0, &mut open, &mut placement, &mut drag, |id| {
+        id == RIB_PLAY && physics_on
+    });
+    for click in clicks {
+        if click.item == egui::Id::new(RIB_PLAY) {
+            physics.0 = !physics.0;
+        }
+    }
 }
 
 // ─── Selection panel ────────────────────────────────────────────────
@@ -514,70 +297,137 @@ fn draw_selection_panel(
         return;
     };
     let accent_col = accent.0;
+    let stage = cid("sel_stage");
+    let prim = cid("sel_prim");
+
+    let sel = selected.0.and_then(|e| {
+        prims.get(e).ok().map(|(_, n, pr)| {
+            let mut tags: Vec<TagItem> = Vec::new();
+            if mesh_q.get(e).is_ok() {
+                tags.push(TagItem::new("mesh"));
+            }
+            if let Ok(k) = kind_q.get(e) {
+                tags.push(TagItem::new(format!("kind:{}", k.kind)));
+            }
+            if children.get(e).map(|c| !c.is_empty()).unwrap_or(false) {
+                tags.push(TagItem::new("parent"));
+            }
+            if audio_q.get(e).is_ok() {
+                tags.push(TagItem::new("audio"));
+            }
+            if proc_q.get(e).is_ok() {
+                tags.push(TagItem::new("procedural"));
+            }
+            if matches!(vis_q.get(e), Ok(Visibility::Hidden)) {
+                tags.push(TagItem::colored("hidden", style::WARNING));
+            }
+            (n.as_str().to_string(), pr.path.clone(), tags)
+        })
+    });
+    let stale = selected.0.is_some() && sel.is_none();
+
+    let mut clear = false;
+    let mut browse = false;
+    let mut reveal = false;
     Pane::new(RIB_SELECTION, "Selection", pane_anchor_for(RIB_SELECTION), accent_col)
         .resize(PaneResize::SPAN)
         .show(ctx, |body| {
-            let ui = body.ui();
-            section(ui, "sel_stage", "Loaded stage", accent_col, true, |ui| {
-                readout_row(ui, "file", info.path.as_str());
-                if wide_button(ui, "📁  Browse USD…", accent_col).clicked()
-                    && let Some(picked) = rfd::FileDialog::new()
-                        .add_filter("USD stages", &["usda", "usdc", "usd", "usdz"])
-                        .pick_file()
-                {
-                    load_req.path = Some(PathBuf::from(picked));
+            body.add_normal(
+                stage,
+                "Loaded stage",
+                "folder",
+                vec![
+                    Pod::new(pid("sel_stage", 0)).with_readout("file", info.path.as_str()),
+                    Pod::new(pid("sel_stage", 1)).with_button("Browse USD…", accent_col),
+                    Pod::new(pid("sel_stage", 2)).with_button("Reveal in filesystem", accent_col),
+                ],
+            );
+            match &sel {
+                Some((name, path, tags)) => {
+                    body.add_normal(
+                        prim,
+                        "Selected prim",
+                        "cursor",
+                        vec![
+                            Pod::new(pid("sel_prim", 0)).with_readout("name", name.as_str()),
+                            Pod::new(pid("sel_prim", 1)).with_readout("path", path.as_str()),
+                            Pod::new(pid("sel_prim", 2)).with_tag_items(tags.clone(), accent_col),
+                            Pod::new(pid("sel_prim", 3)).with_button("Clear selection", accent_col),
+                        ],
+                    );
                 }
-                if wide_button(ui, "🗂  Reveal in filesystem", accent_col).clicked() {
-                    let full = requested.root.join(&info.path);
-                    let target = full.parent().unwrap_or(&requested.root).to_path_buf();
-                    let _ = std::process::Command::new("xdg-open").arg(&target).spawn();
-                }
-            });
-            section(ui, "sel_prim", "Selected prim", accent_col, true, |ui| match selected.0 {
-                Some(entity) => {
-                    if let Ok((_, n, pr)) = prims.get(entity) {
-                        readout_row(ui, "name", n.as_str());
-                        readout_row(ui, "path", pr.path.as_str());
-
-                        // Feature chips — derived purely from ECS
-                        // component presence so the row stays in sync
-                        // with the live stage without a dedicated cache.
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing.x = 3.0;
-                            if mesh_q.get(entity).is_ok() {
-                                chip(ui, "mesh", accent_col);
-                            }
-                            if let Ok(k) = kind_q.get(entity) {
-                                chip(ui, &format!("kind:{}", k.kind), accent_col);
-                            }
-                            if children.get(entity).map(|c| !c.is_empty()).unwrap_or(false) {
-                                chip(ui, "parent", accent_col);
-                            }
-                            if audio_q.get(entity).is_ok() {
-                                chip(ui, "audio", accent_col);
-                            }
-                            if proc_q.get(entity).is_ok() {
-                                chip(ui, "procedural", accent_col);
-                            }
-                            if matches!(vis_q.get(entity), Ok(Visibility::Hidden)) {
-                                chip_colored(ui, "hidden", style::WARNING, accent_col);
-                            }
-                        });
-
-                        if wide_button(ui, "Clear selection", accent_col).clicked() {
-                            selected.0 = None;
-                        }
+                None => {
+                    let msg = if stale {
+                        "(selection stale)"
                     } else {
-                        sub_caption(ui, "(selection stale)");
-                        selected.0 = None;
-                    }
+                        "Click a prim in the Tree panel"
+                    };
+                    body.add_normal(
+                        prim,
+                        "Selected prim",
+                        "cursor",
+                        vec![Pod::new(pid("sel_prim", 0)).with_readout("prim", msg)],
+                    );
                 }
-                None => sub_caption(ui, "Click a prim in the Tree panel"),
-            });
+            }
+            let r = body.render();
+            browse = pod(&r, stage, 1).and_then(|p| p.buttons.first()).is_some_and(|b| b.clicked);
+            reveal = pod(&r, stage, 2).and_then(|p| p.buttons.first()).is_some_and(|b| b.clicked);
+            clear = pod(&r, prim, 3).and_then(|p| p.buttons.first()).is_some_and(|b| b.clicked);
         });
+
+    if stale || clear {
+        selected.0 = None;
+    }
+    if browse
+        && let Some(picked) = rfd::FileDialog::new()
+            .add_filter("USD stages", &["usda", "usdc", "usd", "usdz"])
+            .pick_file()
+    {
+        load_req.path = Some(PathBuf::from(picked));
+    }
+    if reveal {
+        let full = requested.root.join(&info.path);
+        let target = full.parent().unwrap_or(&requested.root).to_path_buf();
+        let _ = std::process::Command::new("xdg-open").arg(&target).spawn();
+    }
 }
 
 // ─── Prim-tree panel ────────────────────────────────────────────────
+
+/// Owned snapshot of one prim row for the (`'static`) tree closure.
+#[derive(Clone)]
+struct TreeNodeSnap {
+    path: String,
+    label: String,
+    depth: u32,
+    has_children: bool,
+    swatch: Option<[f32; 3]>,
+}
+
+fn swatch_rgb_for(
+    entity: Entity,
+    mat_q: &Query<&MeshMaterial3d<StandardMaterial>>,
+    children: &Query<&Children>,
+    materials: &Assets<StandardMaterial>,
+) -> Option<[f32; 3]> {
+    let pick = |e: Entity| -> Option<[f32; 3]> {
+        let mm = mat_q.get(e).ok()?;
+        let mat = materials.get(&mm.0)?;
+        let c = mat.base_color.to_linear();
+        Some([c.red, c.green, c.blue])
+    };
+    pick(entity).or_else(|| children.get(entity).ok().and_then(|cs| cs.iter().find_map(pick)))
+}
+
+const TREE_SELECTED_KEY: &str = "usdview_tree_selected";
+
+fn tree_expand_key(path: &str) -> egui::Id {
+    egui::Id::new(("usdview_tree_expand", path))
+}
+fn tree_vis_key(path: &str) -> egui::Id {
+    egui::Id::new(("usdview_tree_hidden", path))
+}
 
 #[allow(clippy::too_many_arguments)]
 fn draw_tree_panel(
@@ -586,7 +436,6 @@ fn draw_tree_panel(
     accent: Res<AccentColor>,
     mut selected: ResMut<SelectedPrim>,
     mut fly: ResMut<FlyTo>,
-    mut expanded: ResMut<TreeExpanded>,
     mut filter: ResMut<TreeFilter>,
     materials: Res<Assets<StandardMaterial>>,
     cameras: Query<&ArcballCamera>,
@@ -604,440 +453,157 @@ fn draw_tree_panel(
         return;
     };
     let accent_col = accent.0;
+
+    // Owned, sorted snapshot of every prim (path hierarchy).
+    let mut nodes: Vec<TreeNodeSnap> = Vec::new();
+    let mut path_entity: HashMap<String, Entity> = HashMap::new();
+    for (e, name, pref, dn) in prims.iter() {
+        path_entity.entry(pref.path.clone()).or_insert(e);
+        let label = dn.map(|d| d.0.clone()).unwrap_or_else(|| name.as_str().to_string());
+        let depth = pref.path.matches('/').count().saturating_sub(1) as u32;
+        nodes.push(TreeNodeSnap {
+            path: pref.path.clone(),
+            label,
+            depth,
+            has_children: false,
+            swatch: swatch_rgb_for(e, &mat_q, &children, &materials),
+        });
+    }
+    nodes.sort_by(|a, b| a.path.cmp(&b.path));
+    let paths_sorted: Vec<String> = nodes.iter().map(|n| n.path.clone()).collect();
+    for n in nodes.iter_mut() {
+        let prefix = format!("{}/", n.path);
+        n.has_children = paths_sorted.iter().any(|p| p.starts_with(&prefix));
+    }
+
+    let filter_lc = filter.0.to_lowercase();
+    let prim_count = nodes.len();
+
     Pane::new(RIB_TREE, "Prim tree", pane_anchor_for(RIB_TREE), accent_col)
         .resize(PaneResize::SPAN)
         .show(ctx, |body| {
-            let ui = body.ui();
-            section(ui, "tree_hierarchy", "Hierarchy", accent_col, true, |ui| {
-                sub_caption(ui, &format!("{} prims", prims.iter().count()));
-                ui.add_space(style::space::TIGHT);
-                search_field(ui, &mut filter.0, "Search prims…", accent_col);
-                ui.add_space(style::space::BLOCK);
-
-                // Snapshot the current Visibility state so the tree
-                // rows can drive eye-icon toggles via plain &mut bool —
-                // we commit changes back to the ECS once the row
-                // rendering is finished.
-                let mut vis_cache: HashMap<Entity, bool> = HashMap::new();
-                for (e, v) in visibility_q.iter() {
-                    vis_cache.insert(e, !matches!(*v, Visibility::Hidden));
-                }
-                let vis_before = vis_cache.clone();
-
-                let filter_lc = filter.0.to_lowercase();
-                let flat = !filter_lc.is_empty();
-
-                let mut outcome = RowOutcome::default();
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .min_scrolled_height(600.0)
-                    .max_height(600.0)
-                    .show(ui, |ui| {
-                        if flat {
-                            let mut matches: Vec<(
-                                Entity,
-                                &Name,
-                                &UsdPrimRef,
-                                Option<&UsdDisplayName>,
-                            )> = prims
-                                .iter()
-                                .filter(|(_, _, pref, _)| {
-                                    pref.path.to_lowercase().contains(&filter_lc)
-                                })
-                                .collect();
-                            matches.sort_by(|a, b| a.2.path.cmp(&b.2.path));
-                            if matches.is_empty() {
-                                sub_caption(ui, "(no matches)");
-                            }
-                            for (entity, name, pref, dn) in &matches {
-                                let sub = draw_tree_row(
-                                    ui,
-                                    *entity,
-                                    name,
-                                    pref,
-                                    *dn,
-                                    &prims,
-                                    &mat_q,
-                                    &materials,
-                                    &mut vis_cache,
-                                    &children,
-                                    &selected,
-                                    &mut expanded,
-                                    accent_col,
-                                    0,
-                                    true,
-                                );
-                                outcome.merge(sub);
-                            }
-                        } else {
-                            let mut roots: Vec<(
-                                Entity,
-                                &Name,
-                                &UsdPrimRef,
-                                Option<&UsdDisplayName>,
-                            )> = prims
-                                .iter()
-                                .filter(|(_, _, pref, _)| {
-                                    let p = pref.path.as_str();
-                                    p.starts_with('/') && p.len() > 1 && !p[1..].contains('/')
-                                })
-                                .collect();
-                            roots.sort_by(|a, b| a.2.path.cmp(&b.2.path));
-
-                            if roots.is_empty() {
-                                sub_caption(ui, "(no prims yet — stage loading)");
-                            } else {
-                                for (entity, name, pref, dn) in &roots {
-                                    let sub = draw_tree_row(
-                                        ui,
-                                        *entity,
-                                        name,
-                                        pref,
-                                        *dn,
-                                        &prims,
-                                        &mat_q,
-                                        &materials,
-                                        &mut vis_cache,
-                                        &children,
-                                        &selected,
-                                        &mut expanded,
-                                        accent_col,
-                                        0,
-                                        false,
-                                    );
-                                    outcome.merge(sub);
-                                }
-                            }
-                        }
-                    });
-
-                // Commit eye-icon toggles back to the ECS.
-                for (entity, visible) in &vis_cache {
-                    if vis_before.get(entity) != Some(visible) {
-                        if let Ok((_, mut v)) = visibility_q.get_mut(*entity) {
-                            *v = if *visible {
-                                Visibility::Inherited
-                            } else {
-                                Visibility::Hidden
-                            };
-                        }
-                    }
-                }
-
-                if let Some(action) = outcome.ctx_action {
-                    match action {
-                        CtxAction::FlyTo(entity) => {
-                            selected.0 = Some(entity);
-                            if let (Ok(target_gt), Ok(cam)) =
-                                (gt_query.get(entity), cameras.single())
-                            {
-                                let target = target_gt.translation();
-                                let target_dist = (cam.distance * 0.25).clamp(0.2, 40.0);
-                                fly.start_focus = cam.focus;
-                                fly.start_distance = cam.distance;
-                                fly.target_focus = target;
-                                fly.target_distance = target_dist;
-                                fly.duration = 0.4;
-                                fly.remaining = 0.4;
-                            }
-                        }
-                        CtxAction::Fit(entity) => {
-                            selected.0 = Some(entity);
-                            if let Ok(cam) = cameras.single() {
-                                let (target, target_dist) = fit_params_for_entity(
-                                    entity,
-                                    &gt_query,
-                                    &extent_q,
-                                    &children,
-                                    cam.distance,
-                                );
-                                fly.start_focus = cam.focus;
-                                fly.start_distance = cam.distance;
-                                fly.target_focus = target;
-                                fly.target_distance = target_dist;
-                                fly.duration = 0.4;
-                                fly.remaining = 0.4;
-                            }
-                        }
-                        CtxAction::ExpandDesc(entity) => {
-                            set_subtree_expanded(entity, &prims, &children, &mut expanded, true);
-                        }
-                        CtxAction::CollapseDesc(entity) => {
-                            set_subtree_expanded(entity, &prims, &children, &mut expanded, false);
-                        }
-                    }
-                }
-
-                if let Some(entity) = outcome.double_clicked {
-                    selected.0 = Some(entity);
-                    if let Ok(cam) = cameras.single() {
-                        let (target, target_dist) = fit_params_for_entity(
-                            entity,
-                            &gt_query,
-                            &extent_q,
-                            &children,
-                            cam.distance,
-                        );
-                        fly.start_focus = cam.focus;
-                        fly.start_distance = cam.distance;
-                        fly.target_focus = target;
-                        fly.target_distance = target_dist;
-                        fly.duration = 0.4;
-                        fly.remaining = 0.4;
-                    }
-                } else if let Some(entity) = outcome.clicked {
-                    selected.0 = Some(entity);
-                    if let (Ok(target_gt), Ok(cam)) = (gt_query.get(entity), cameras.single()) {
-                        let target = target_gt.translation();
-                        let target_dist = (cam.distance * 0.25).clamp(0.2, 40.0);
-                        fly.start_focus = cam.focus;
-                        fly.start_distance = cam.distance;
-                        fly.target_focus = target;
-                        fly.target_distance = target_dist;
-                        fly.duration = 0.4;
-                        fly.remaining = 0.4;
-                    }
-                }
-            });
+            body.add_normal(
+                cid("tree"),
+                "Hierarchy",
+                "folder",
+                vec![
+                    Pod::new(pid("tree", 0)).with_readout("prims", prim_count.to_string()),
+                    Pod::new(pid("tree", 1)).with_search("Search prims…", accent_col),
+                    Pod::new(pid("tree", 2)).fill().with_tree(8, move |tree| {
+                        render_tree(tree, &nodes, &filter_lc, accent_col);
+                    }),
+                ],
+            );
+            body.render();
         });
-}
 
-#[derive(Default, Clone, Copy)]
-struct RowOutcome {
-    clicked: Option<Entity>,
-    double_clicked: Option<Entity>,
-    ctx_action: Option<CtxAction>,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum CtxAction {
-    FlyTo(Entity),
-    Fit(Entity),
-    ExpandDesc(Entity),
-    CollapseDesc(Entity),
-}
-
-impl RowOutcome {
-    fn merge(&mut self, other: RowOutcome) {
-        if other.double_clicked.is_some() {
-            self.double_clicked = other.double_clicked;
-        }
-        if other.clicked.is_some() {
-            self.clicked = other.clicked;
-        }
-        if other.ctx_action.is_some() {
-            self.ctx_action = other.ctx_action;
-        }
-    }
-}
-
-/// Walk the subtree rooted at `root` and set each descendant's
-/// `TreeExpanded` entry to `open`.
-fn set_subtree_expanded(
-    root: Entity,
-    prims: &Query<(Entity, &Name, &UsdPrimRef, Option<&UsdDisplayName>)>,
-    children: &Query<&Children>,
-    expanded: &mut TreeExpanded,
-    open: bool,
-) {
-    let mut stack = vec![root];
-    while let Some(e) = stack.pop() {
+    // Reconcile ctx-data interactions with the ECS (the tree closure is
+    // `'static`, so it persists selection / hidden-set to ctx-data here).
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+    filter.0 = Pod::search_query(ctx, pid("tree", 1), 0);
+    for (e, mut v) in visibility_q.iter_mut() {
         if let Ok((_, _, pref, _)) = prims.get(e) {
-            expanded.0.insert(pref.path.clone(), open);
-        }
-        if let Ok(cs) = children.get(e) {
-            for c in cs.iter() {
-                stack.push(c);
+            let hidden = ctx.data_mut(|d| d.get_persisted::<bool>(tree_vis_key(&pref.path))).unwrap_or(false);
+            let want = if hidden { Visibility::Hidden } else { Visibility::Inherited };
+            if *v != want {
+                *v = want;
             }
         }
     }
-}
-
-/// Lookup the first-bound material's `base_color` for `entity` (or one
-/// of its direct mesh-carrying children) and convert linear sRGB into
-/// an egui colour suitable for a tree-row swatch.
-fn swatch_color_for(
-    entity: Entity,
-    mat_q: &Query<&MeshMaterial3d<StandardMaterial>>,
-    children: &Query<&Children>,
-    materials: &Assets<StandardMaterial>,
-) -> Option<egui::Color32> {
-    let pick = |e: Entity| -> Option<egui::Color32> {
-        let mm = mat_q.get(e).ok()?;
-        let mat = materials.get(&mm.0)?;
-        let c = mat.base_color.to_linear();
-        Some(style::srgb_to_egui([c.red, c.green, c.blue]))
-    };
-    if let Some(c) = pick(entity) {
-        return Some(c);
-    }
-    if let Ok(cs) = children.get(entity) {
-        for c in cs.iter() {
-            if let Some(col) = pick(c) {
-                return Some(col);
-            }
-        }
-    }
-    None
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_tree_row(
-    ui: &mut egui::Ui,
-    entity: Entity,
-    name: &Name,
-    prim_ref: &UsdPrimRef,
-    display_name: Option<&UsdDisplayName>,
-    prims: &Query<(Entity, &Name, &UsdPrimRef, Option<&UsdDisplayName>)>,
-    mat_q: &Query<&MeshMaterial3d<StandardMaterial>>,
-    materials: &Assets<StandardMaterial>,
-    vis_cache: &mut HashMap<Entity, bool>,
-    children: &Query<&Children>,
-    selected: &SelectedPrim,
-    expanded: &mut TreeExpanded,
-    accent: egui::Color32,
-    depth: u32,
-    leaf_override: bool,
-) -> RowOutcome {
-    let child_ids: Vec<Entity> = children
-        .get(entity)
-        .map(|c| c.iter().collect())
+    let sel_path: String = ctx
+        .data(|d| d.get_temp::<String>(egui::Id::new(TREE_SELECTED_KEY)))
         .unwrap_or_default();
-    let mut prim_children: Vec<(Entity, &Name, &UsdPrimRef, Option<&UsdDisplayName>)> = child_ids
-        .iter()
-        .filter_map(|c| prims.get(*c).ok())
-        .collect();
-    prim_children.sort_by(|a, b| a.2.path.cmp(&b.2.path));
-    let has_children = !leaf_override && !prim_children.is_empty();
-
-    let is_selected = selected.0 == Some(entity);
-    let path_key = prim_ref.path.clone();
-    let row_id_salt = entity.to_bits();
-    let mut outcome = RowOutcome::default();
-
-    // Eye + swatch slots.
-    let mut visible_flag = *vis_cache.get(&entity).unwrap_or(&true);
-    let swatch = swatch_color_for(entity, mat_q, children, materials);
-    let mut color_sentinel = false;
-
-    // Label preference: authored `ui:displayName` (UsdUI) > prim leaf
-    // name.
-    let label_owned: String = display_name
-        .map(|d| d.0.clone())
-        .unwrap_or_else(|| name.as_str().to_string());
-
-    let resp = {
-        let mut slot_buf: Vec<TreeIconSlot<'_>> = Vec::with_capacity(2);
-        slot_buf.push(
-            TreeIconSlot::new(TreeIconKind::Eye, &mut visible_flag)
-                .with_tooltip("Toggle visibility"),
-        );
-        if let Some(c) = swatch {
-            slot_buf.push(TreeIconSlot::new(TreeIconKind::Color(c), &mut color_sentinel));
+    if !sel_path.is_empty()
+        && let Some(&entity) = path_entity.get(&sel_path)
+    {
+        let already = selected.0 == Some(entity);
+        selected.0 = Some(entity);
+        if !already
+            && let Ok(cam) = cameras.single()
+        {
+            let (target, target_dist) =
+                fit_params_for_entity(entity, &gt_query, &extent_q, &children, cam.distance);
+            fly.start_focus = cam.focus;
+            fly.start_distance = cam.distance;
+            fly.target_focus = target;
+            fly.target_distance = target_dist;
+            fly.duration = 0.4;
+            fly.remaining = 0.4;
         }
+    }
+}
 
-        if has_children {
-            let is_open = *expanded.0.entry(path_key.clone()).or_insert(true);
-            let mut open_ref = is_open;
-            let r = tree_row(
-                ui,
-                row_id_salt,
-                depth,
-                Some(&mut open_ref),
-                None,
-                &label_owned,
-                is_selected,
-                accent,
-                &mut slot_buf,
-            );
-            if open_ref != is_open {
-                expanded.0.insert(path_key.clone(), open_ref);
+/// Render the prim hierarchy inside the (`'static`) `with_tree` closure
+/// from the owned snapshot. Persists expansion / selection / hidden-set
+/// to ctx-data so the system can reconcile with the ECS.
+fn render_tree(
+    tree: &mut mara_core::widget::TreeBody,
+    nodes: &[TreeNodeSnap],
+    filter: &str,
+    accent: egui::Color32,
+) {
+    let flat = !filter.is_empty();
+    let selected = tree
+        .temp_string(egui::Id::new(TREE_SELECTED_KEY))
+        .unwrap_or_default();
+
+    let mut collapsed_at: Option<u32> = None;
+    for node in nodes {
+        if flat && !node.path.to_lowercase().contains(filter) {
+            continue;
+        }
+        if !flat
+            && let Some(d) = collapsed_at
+        {
+            if node.depth > d {
+                continue;
             }
-            r
-        } else {
-            tree_row(
-                ui,
-                row_id_salt,
-                depth,
-                None,
-                None,
-                &label_owned,
-                is_selected,
-                accent,
-                &mut slot_buf,
-            )
+            collapsed_at = None;
         }
-    };
+        let depth = if flat { 0 } else { node.depth };
+        let expand_key = tree_expand_key(&node.path);
+        let vis_key = tree_vis_key(&node.path);
+        let mut expanded = tree.persisted_bool(expand_key).unwrap_or(true);
+        let hidden = tree.persisted_bool(vis_key).unwrap_or(false);
+        let mut visible = !hidden;
 
-    vis_cache.insert(entity, visible_flag);
+        let is_sel = selected == node.path;
+        let id_salt = egui::Id::new(("usdview_treerow", &node.path));
 
-    if resp.body.hovered() {
-        resp.body.clone().on_hover_text(&prim_ref.path);
-    }
-    if resp.body.double_clicked() {
-        outcome.double_clicked = Some(entity);
-    } else if resp.body.clicked() {
-        outcome.clicked = Some(entity);
-    }
+        let resp = {
+            let mut slots: Vec<TreeIconSlot<'_>> = Vec::with_capacity(2);
+            slots.push(TreeIconSlot::new(TreeIconKind::Eye, &mut visible).with_tooltip("Toggle visibility"));
+            let mut sentinel = false;
+            if let Some(rgb) = node.swatch {
+                slots.push(TreeIconSlot::new(
+                    TreeIconKind::Color(style::srgb_to_egui(rgb)),
+                    &mut sentinel,
+                ));
+            }
+            let exp = if !flat && node.has_children {
+                Some(&mut expanded)
+            } else {
+                None
+            };
+            tree.row(id_salt, depth, exp, None, &node.label, is_sel, accent, &mut slots)
+        };
 
-    context_menu_mara(&resp.body, accent, |ui| {
-        ui.spacing_mut().item_spacing.y = 2.0;
-        if wide_button(ui, "Fly to", accent).clicked() {
-            outcome.ctx_action = Some(CtxAction::FlyTo(entity));
-            ui.close();
+        let _ = hidden;
+        tree.set_persisted_bool(vis_key, !visible);
+        tree.set_persisted_bool(expand_key, expanded);
+        if !flat && node.has_children && !expanded {
+            collapsed_at = Some(node.depth);
         }
-        if wide_button(ui, "Fit to bounds", accent).clicked() {
-            outcome.ctx_action = Some(CtxAction::Fit(entity));
-            ui.close();
-        }
-        if wide_button(ui, "Copy path", accent).clicked() {
-            ui.ctx().copy_text(prim_ref.path.clone());
-            ui.close();
-        }
-        if wide_button(ui, "Expand descendants", accent).clicked() {
-            outcome.ctx_action = Some(CtxAction::ExpandDesc(entity));
-            ui.close();
-        }
-        if wide_button(ui, "Collapse descendants", accent).clicked() {
-            outcome.ctx_action = Some(CtxAction::CollapseDesc(entity));
-            ui.close();
-        }
-    });
-
-    let show_children = if has_children {
-        *expanded.0.get(&path_key).unwrap_or(&true)
-    } else {
-        false
-    };
-    if show_children {
-        for (child_entity, child_name, child_ref, child_dn) in prim_children {
-            let sub = draw_tree_row(
-                ui,
-                child_entity,
-                child_name,
-                child_ref,
-                child_dn,
-                prims,
-                mat_q,
-                materials,
-                vis_cache,
-                children,
-                selected,
-                expanded,
-                accent,
-                depth + 1,
-                false,
-            );
-            outcome.merge(sub);
+        if resp.body.clicked {
+            tree.set_temp_string(egui::Id::new(TREE_SELECTED_KEY), node.path.clone());
         }
     }
-
-    outcome
 }
 
 /// Walk the subtree rooted at `root`, transforming each descendant's
 /// authored local extent into world space, and fold into one AABB.
-/// Returns `(focus, distance)` sized for arcball framing.
 fn fit_params_for_entity(
     root: Entity,
     gt_q: &Query<&GlobalTransform>,
@@ -1076,8 +642,7 @@ fn fit_params_for_entity(
         let center = (min + max) * 0.5;
         let size = (max - min).abs();
         let max_dim = size.x.max(size.y).max(size.z).max(0.05);
-        let dist = (max_dim * 1.6).clamp(0.2, 200.0);
-        (center, dist)
+        (center, (max_dim * 1.6).clamp(0.2, 200.0))
     } else if let Ok(gt) = gt_q.get(root) {
         (gt.translation(), (current_cam_dist * 0.25).clamp(0.2, 40.0))
     } else {
@@ -1087,7 +652,6 @@ fn fit_params_for_entity(
 
 // ─── Stage-info panel ───────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
 fn draw_info_panel(
     mut contexts: EguiContexts,
     open: Res<RibbonOpen>,
@@ -1106,99 +670,109 @@ fn draw_info_panel(
         return;
     };
     let accent_col = accent.0;
+    let actions = cid("info_actions");
+    let mut reload_clicked = false;
     Pane::new(RIB_INFO, "Stage info", pane_anchor_for(RIB_INFO), accent_col)
         .resize(PaneResize::SPAN)
         .show(ctx, |body| {
-            let ui = body.ui();
-            section(ui, "info_stage", "Stage", accent_col, true, |ui| {
-                readout_row(ui, "file", &info.path);
-                readout_row(ui, "defaultPrim", info.default_prim.as_deref().unwrap_or("—"));
-                readout_row(ui, "layers", &info.layer_count.to_string());
-                readout_row(ui, "prims", &prims.iter().count().to_string());
-                readout_row(ui, "meshes", &meshes_q.iter().count().to_string());
-                readout_row(ui, "variants", &info.variant_count.to_string());
-            });
-            section(ui, "info_lights", "Lights & instances", accent_col, true, |ui| {
-                let light_labels = [
-                    format!("{} dir", info.lights_directional),
-                    format!("{} pt", info.lights_point),
-                    format!("{} spot", info.lights_spot),
-                    format!("{} dome", info.lights_dome),
-                ];
-                let refs: Vec<&str> = light_labels.iter().map(String::as_str).collect();
-                badge_row(ui, "lights", &refs, accent_col);
-
-                let inst_labels = [
-                    format!("{} prim", info.instance_prim_count),
-                    format!("{} reuse", info.instance_prototype_reuses),
-                ];
-                let refs: Vec<&str> = inst_labels.iter().map(String::as_str).collect();
-                badge_row(ui, "instances", &refs, accent_col);
-
-                readout_row(ui, "animated", &format!("{} prim(s)", info.animated_prim_count));
-            });
-            section(ui, "info_skel_render", "Skel & render", accent_col, true, |ui| {
-                let skel_labels = [
-                    format!("{} skel", info.skeleton_count),
-                    format!("{} root", info.skel_root_count),
-                    format!("{} bind", info.skel_binding_count),
-                ];
-                let refs: Vec<&str> = skel_labels.iter().map(String::as_str).collect();
-                badge_row(ui, "skel", &refs, accent_col);
-
-                let render_labels = [
-                    format!("{} settings", info.render_settings_count),
-                    format!("{} product", info.render_product_count),
-                    format!("{} var", info.render_var_count),
-                ];
-                let refs: Vec<&str> = render_labels.iter().map(String::as_str).collect();
-                badge_row(ui, "render", &refs, accent_col);
-
-                if let Some([w, h]) = info.render_primary_resolution {
-                    readout_row(ui, "resolution", &format!("{w} × {h}"));
-                }
-
-                let phys_labels = [
-                    format!("{} scene", info.physics_scene_count),
-                    format!("{} rigid", info.rigid_body_count),
-                    format!("{} joint", info.joint_count),
-                ];
-                let refs: Vec<&str> = phys_labels.iter().map(String::as_str).collect();
-                badge_row(ui, "physics", &refs, accent_col);
-            });
-            section(ui, "info_authoring", "Authoring detail", accent_col, true, |ui| {
-                readout_row(
-                    ui,
-                    "custom",
-                    &format!(
-                        "{} prim · {} layer entries",
-                        info.custom_attr_prim_count, info.custom_layer_data_entries
+            body.add_normal(
+                cid("info_stage"),
+                "Stage",
+                "document",
+                vec![
+                    Pod::new(pid("info_stage", 0)).with_readout("file", info.path.as_str()),
+                    Pod::new(pid("info_stage", 1)).with_readout("defaultPrim", info.default_prim.as_deref().unwrap_or("—")),
+                    Pod::new(pid("info_stage", 2)).with_readout("layers", info.layer_count.to_string()),
+                    Pod::new(pid("info_stage", 3)).with_readout("prims", prims.iter().count().to_string()),
+                    Pod::new(pid("info_stage", 4)).with_readout("meshes", meshes_q.iter().count().to_string()),
+                    Pod::new(pid("info_stage", 5)).with_readout("variants", info.variant_count.to_string()),
+                ],
+            );
+            body.add_normal(
+                cid("info_lights"),
+                "Lights & instances",
+                "options",
+                vec![
+                    Pod::new(pid("info_lights", 0)).with_badge_row(
+                        "lights",
+                        vec![
+                            format!("{} dir", info.lights_directional),
+                            format!("{} pt", info.lights_point),
+                            format!("{} spot", info.lights_spot),
+                            format!("{} dome", info.lights_dome),
+                        ],
+                        accent_col,
                     ),
-                );
-                readout_row(
-                    ui,
-                    "subdiv",
-                    &format!("{} mesh(es) subdivision", info.subdivision_prim_count),
-                );
-                readout_row(
-                    ui,
-                    "light-link",
-                    &format!("{} light(s) linked", info.light_linked_count),
-                );
-                readout_row(ui, "clips", &format!("{} prim(s) UsdClipsAPI", info.clip_prim_count));
-                readout_row(
-                    ui,
-                    "spatial-audio",
-                    &format!("{} source(s)", spatial_audio_q.iter().count()),
-                );
-                readout_row(ui, "procedural", &format!("{} prim(s)", procedural_q.iter().count()));
-            });
-            section(ui, "info_actions", "Actions", accent_col, true, |ui| {
-                if wide_button(ui, "⟳  Reload stage (R)", accent_col).clicked() {
-                    reload.requested = true;
-                }
-            });
+                    Pod::new(pid("info_lights", 1)).with_badge_row(
+                        "instances",
+                        vec![
+                            format!("{} prim", info.instance_prim_count),
+                            format!("{} reuse", info.instance_prototype_reuses),
+                        ],
+                        accent_col,
+                    ),
+                    Pod::new(pid("info_lights", 2)).with_readout("animated", format!("{} prim(s)", info.animated_prim_count)),
+                ],
+            );
+            body.add_normal(
+                cid("info_skel"),
+                "Skel & render",
+                "options",
+                vec![
+                    Pod::new(pid("info_skel", 0)).with_badge_row(
+                        "skel",
+                        vec![
+                            format!("{} skel", info.skeleton_count),
+                            format!("{} root", info.skel_root_count),
+                            format!("{} bind", info.skel_binding_count),
+                        ],
+                        accent_col,
+                    ),
+                    Pod::new(pid("info_skel", 1)).with_badge_row(
+                        "render",
+                        vec![
+                            format!("{} settings", info.render_settings_count),
+                            format!("{} product", info.render_product_count),
+                            format!("{} var", info.render_var_count),
+                        ],
+                        accent_col,
+                    ),
+                    Pod::new(pid("info_skel", 2)).with_badge_row(
+                        "physics",
+                        vec![
+                            format!("{} scene", info.physics_scene_count),
+                            format!("{} rigid", info.rigid_body_count),
+                            format!("{} joint", info.joint_count),
+                        ],
+                        accent_col,
+                    ),
+                ],
+            );
+            body.add_normal(
+                cid("info_authoring"),
+                "Authoring detail",
+                "document",
+                vec![
+                    Pod::new(pid("info_authoring", 0)).with_readout("custom", format!("{} prim · {} layer", info.custom_attr_prim_count, info.custom_layer_data_entries)),
+                    Pod::new(pid("info_authoring", 1)).with_readout("subdiv", format!("{} mesh(es)", info.subdivision_prim_count)),
+                    Pod::new(pid("info_authoring", 2)).with_readout("light-link", format!("{} light(s)", info.light_linked_count)),
+                    Pod::new(pid("info_authoring", 3)).with_readout("clips", format!("{} prim(s)", info.clip_prim_count)),
+                    Pod::new(pid("info_authoring", 4)).with_readout("spatial-audio", format!("{} source(s)", spatial_audio_q.iter().count())),
+                    Pod::new(pid("info_authoring", 5)).with_readout("procedural", format!("{} prim(s)", procedural_q.iter().count())),
+                ],
+            );
+            body.add_normal(
+                actions,
+                "Actions",
+                "options",
+                vec![Pod::new(pid("info_actions", 0)).with_button("Reload stage (R)", accent_col)],
+            );
+            let r = body.render();
+            reload_clicked = pod(&r, actions, 0).and_then(|p| p.buttons.first()).is_some_and(|b| b.clicked);
         });
+    if reload_clicked {
+        reload.requested = true;
+    }
 }
 
 // ─── Variants panel ─────────────────────────────────────────────────
@@ -1212,7 +786,6 @@ fn draw_variants_panel(
     mut loader_tuning: ResMut<LoaderTuning>,
     mut pending_anim: ResMut<PendingAnimationClip>,
     mut pending_variant_switch: ResMut<usd_bevy::incremental::PendingVariantSwitch>,
-    mut reload: ResMut<ReloadRequest>,
 ) {
     if !is_panel_open(&open, RIB_VARIANTS) {
         return;
@@ -1221,258 +794,73 @@ fn draw_variants_panel(
         return;
     };
     let accent_col = accent.0;
-    Pane::new(RIB_VARIANTS, "Variants", pane_anchor_for(RIB_VARIANTS), accent_col)
-        .resize(PaneResize::SPAN)
-        .show(ctx, |body| {
-            let ui = body.ui();
-            section(ui, "variants_animation", "Animation clips", accent_col, true, |ui| {
-                let asset = stage.as_ref().and_then(|stage| usd_assets.get(&stage.0));
-                let Some(asset) = asset else {
-                    sub_caption(ui, "(no stage loaded yet)");
-                    return;
-                };
 
-                let mut anim_sets: Vec<_> = asset
-                    .variants
-                    .iter()
-                    .flat_map(|(prim_path, sets)| {
-                        sets.iter()
-                            .filter(|set| set.name == "anim" && !set.options.is_empty())
-                            .map(move |set| (prim_path, set))
-                    })
-                    .collect();
-                anim_sets.sort_by(|a, b| a.0.cmp(b.0));
-
-                if anim_sets.is_empty() {
-                    if asset.skel_animations.is_empty() {
-                        sub_caption(ui, "No UsdSkel animations or `anim` variant set found.");
-                    } else {
-                        sub_caption(
-                            ui,
-                            &format!(
-                                "{} SkelAnimation prim(s) found; this stage does not expose an `anim` variant switch.",
-                                asset.skel_animations.len()
-                            ),
-                        );
-                    }
-                    return;
+    // Owned snapshot of (prim, set_name, options, current_idx, is_anim).
+    let mut sets: Vec<(String, String, Vec<String>, usize, bool)> = Vec::new();
+    if let Some(asset) = stage.as_ref().and_then(|s| usd_assets.get(&s.0)) {
+        for (prim_path, vsets) in &asset.variants {
+            for set in vsets {
+                if set.options.is_empty() {
+                    continue;
                 }
-
-                sub_caption(ui, "Switches the live UsdSkel clip without reloading the stage.");
-                ui.add_space(style::space::BLOCK);
-
-                let mut changed = false;
-                for (prim_path, set) in anim_sets {
-                    let key = (prim_path.clone(), set.name.clone());
-                    let authored = set.selection.as_deref().unwrap_or("");
-                    let current = loader_tuning
-                        .variants
-                        .get(&key)
-                        .cloned()
-                        .unwrap_or_else(|| authored.to_string());
-                    let mut selected_idx =
-                        set.options.iter().position(|o| o == &current).unwrap_or(0);
-                    let options_str: Vec<&str> = set.options.iter().map(|s| s.as_str()).collect();
-
-                    labelled_row(ui, prim_path.as_str(), |ui| {
-                        let r = scroll_dropdown_control(
-                            ui,
-                            (prim_path.as_str(), "animation_clip"),
-                            &mut selected_idx,
-                            &options_str,
-                            accent_col,
-                        );
-                        if r.changed() {
-                            let picked = set.options[selected_idx].clone();
-                            if picked != current {
-                                loader_tuning.variants.insert(key.clone(), picked);
-                                pending_anim.name = Some(set.options[selected_idx].clone());
-                                changed = true;
-                            }
-                        }
-                    });
-                }
-                let _ = changed;
-            });
-            section(ui, "variants_all", "Variant sets", accent_col, true, |ui| {
-                let asset = stage.as_ref().and_then(|stage| usd_assets.get(&stage.0));
-                match asset {
-                    Some(asset)
-                        if asset
-                            .variants
-                            .values()
-                            .any(|sets| sets.iter().any(|set| set.name != "anim")) =>
-                    {
-                        let variant_prim_count = asset
-                            .variants
-                            .values()
-                            .filter(|sets| sets.iter().any(|set| set.name != "anim"))
-                            .count();
-                        sub_caption(
-                            ui,
-                            &format!("{variant_prim_count} prims author non-animation variant sets"),
-                        );
-                        ui.add_space(style::space::BLOCK);
-
-                        let mut changed = false;
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            let mut entries: Vec<_> = asset
-                                .variants
-                                .iter()
-                                .filter_map(|(prim_path, sets)| {
-                                    let variant_sets: Vec<_> =
-                                        sets.iter().filter(|set| set.name != "anim").collect();
-                                    (!variant_sets.is_empty()).then_some((prim_path, variant_sets))
-                                })
-                                .collect();
-                            entries.sort_by(|a, b| a.0.cmp(b.0));
-                            for (prim_path, sets) in entries {
-                                section(
-                                    ui,
-                                    prim_path.as_str(),
-                                    prim_path.as_str(),
-                                    accent_col,
-                                    true,
-                                    |ui| {
-                                        for set in sets {
-                                            let key = (prim_path.clone(), set.name.clone());
-                                            let authored = set.selection.as_deref().unwrap_or("");
-                                            let current = loader_tuning
-                                                .variants
-                                                .get(&key)
-                                                .cloned()
-                                                .unwrap_or_else(|| authored.to_string());
-
-                                            if set.options.is_empty() {
-                                                readout_row(ui, &set.name, "(no options)");
-                                                continue;
-                                            }
-
-                                            let mut selected_idx = set
-                                                .options
-                                                .iter()
-                                                .position(|o| o == &current)
-                                                .unwrap_or(0);
-                                            let options_str: Vec<&str> =
-                                                set.options.iter().map(|s| s.as_str()).collect();
-
-                                            labelled_row(ui, &set.name, |ui| {
-                                                let r = scroll_dropdown_control(
-                                                    ui,
-                                                    (prim_path.as_str(), set.name.as_str()),
-                                                    &mut selected_idx,
-                                                    &options_str,
-                                                    accent_col,
-                                                );
-                                                if r.changed() {
-                                                    let picked =
-                                                        set.options[selected_idx].clone();
-                                                    if picked != current {
-                                                        loader_tuning
-                                                            .variants
-                                                            .insert(key.clone(), picked.clone());
-                                                        // Apply the switch incrementally (live
-                                                        // material swap, no scene rebuild).
-                                                        pending_variant_switch.queue.push((
-                                                            prim_path.clone(),
-                                                            set.name.clone(),
-                                                            picked,
-                                                        ));
-                                                    }
-                                                }
-                                            });
-
-                                            if !current.is_empty() && current != authored {
-                                                labelled_row(ui, "", |ui| {
-                                                    if ui
-                                                        .small_button("reset to authored")
-                                                        .clicked()
-                                                    {
-                                                        loader_tuning.variants.remove(&key);
-                                                        changed = true;
-                                                    }
-                                                });
-                                            }
-                                        }
-                                    },
-                                );
-                            }
-                        });
-                        if changed {
-                            reload.requested = true;
-                        }
-                    }
-                    Some(_) => {
-                        sub_caption(ui, "Stage authors no non-animation variant sets.");
-                    }
-                    None => {
-                        sub_caption(ui, "(no stage loaded yet)");
-                    }
-                }
-            });
-        });
-}
-
-/// Local dropdown for long USD variant / animation lists. egui's
-/// ComboBox has a built-in scroll area via `.height(...)`, while still
-/// returning a normal changed Response.
-fn scroll_dropdown_control(
-    ui: &mut egui::Ui,
-    id_salt: impl Hash,
-    selected: &mut usize,
-    options: &[&str],
-    _accent: egui::Color32,
-) -> egui::Response {
-    let display = options.get(*selected).copied().unwrap_or("—");
-    let max_w = ui.available_width().max(60.0).min(200.0);
-    let mut changed = false;
-    let mut response = egui::ComboBox::from_id_salt(("usdview_scroll_dropdown", id_salt))
-        .selected_text(display)
-        .width(max_w)
-        .height(240.0)
-        .show_ui(ui, |ui| {
-            for (idx, opt) in options.iter().enumerate() {
-                if ui.selectable_label(*selected == idx, *opt).clicked() {
-                    if *selected != idx {
-                        *selected = idx;
-                        changed = true;
-                    }
-                    ui.close();
-                }
-            }
-        })
-        .response;
-    if response.clicked() || changed {
-        response.request_focus();
-    }
-    if response.has_focus() && !options.is_empty() {
-        ui.ctx().memory_mut(|m| {
-            m.set_focus_lock_filter(
-                response.id,
-                egui::EventFilter {
-                    vertical_arrows: true,
-                    ..Default::default()
-                },
-            );
-        });
-        let delta = ui.input_mut(|i| {
-            i.count_and_consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) as isize
-                - i.count_and_consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) as isize
-        });
-        if delta != 0 {
-            let len = options.len() as isize;
-            let next = (*selected as isize + delta).rem_euclid(len) as usize;
-            if next != *selected {
-                *selected = next;
-                changed = true;
-                response.request_focus();
+                let key = (prim_path.clone(), set.name.clone());
+                let authored = set.selection.as_deref().unwrap_or("");
+                let current = loader_tuning.variants.get(&key).cloned().unwrap_or_else(|| authored.to_string());
+                let idx = set.options.iter().position(|o| o == &current).unwrap_or(0);
+                sets.push((prim_path.clone(), set.name.clone(), set.options.clone(), idx, set.name == "anim"));
             }
         }
     }
-    if changed {
-        response.mark_changed();
+    sets.sort_by(|a, b| (a.0.as_str(), a.1.as_str()).cmp(&(b.0.as_str(), b.1.as_str())));
+
+    let cont = cid("variants");
+    let mut picks: Vec<(usize, usize)> = Vec::new();
+    Pane::new(RIB_VARIANTS, "Variants", pane_anchor_for(RIB_VARIANTS), accent_col)
+        .resize(PaneResize::SPAN)
+        .show(ctx, |body| {
+            if sets.is_empty() {
+                body.add_normal(
+                    cont,
+                    "Variants",
+                    "options",
+                    vec![Pod::new(pid("variants", 0)).with_readout("variants", "(none authored)")],
+                );
+                body.render();
+                return;
+            }
+            let pods: Vec<Pod> = sets
+                .iter()
+                .enumerate()
+                .map(|(i, (prim, name, opts, idx, _))| {
+                    let label = format!("{}  ·  {name}", prim.rsplit('/').next().unwrap_or(prim));
+                    Pod::new(pid("variants", i))
+                        .with_readout("set", label)
+                        .with_dropdown(opts.clone(), *idx, accent_col)
+                })
+                .collect();
+            body.add_normal(cont, "Variant sets", "options", pods);
+            let r = body.render();
+            for (i, _) in sets.iter().enumerate() {
+                if let Some(d) = pod(&r, cont, i).and_then(|p| p.dropdowns.first())
+                    && d.changed
+                {
+                    picks.push((i, d.selected));
+                }
+            }
+        });
+
+    for (set_idx, opt_idx) in picks {
+        let (prim, name, opts, _cur, is_anim) = &sets[set_idx];
+        let Some(picked) = opts.get(opt_idx).cloned() else {
+            continue;
+        };
+        loader_tuning.variants.insert((prim.clone(), name.clone()), picked.clone());
+        if *is_anim {
+            pending_anim.name = Some(picked);
+        } else {
+            pending_variant_switch.queue.push((prim.clone(), name.clone(), picked));
+        }
     }
-    response
 }
 
 // ─── Cameras panel ──────────────────────────────────────────────────
@@ -1495,125 +883,100 @@ fn draw_cameras_panel(
         return;
     };
     let accent_col = accent.0;
+
+    let bm_names: Vec<String> = bookmarks.items.iter().map(|b| b.name.clone()).collect();
+    let bm_trailing: Vec<String> = bookmarks.items.iter().map(|b| format!("d {:.1}", b.distance)).collect();
+
+    let mut cam_labels: Vec<String> = vec!["Arcball (free)".to_string()];
+    let mut cam_trailing: Vec<String> = vec!["free".to_string()];
+    let mut cam_paths: Vec<Option<String>> = vec![None];
+    if let Some(asset) = usd_assets.iter().next().map(|(_, a)| a) {
+        for cam in &asset.cameras {
+            let name = cam.path.rsplit('/').next().unwrap_or(&cam.path);
+            let focal = cam.data.focal_length_mm.unwrap_or(50.0);
+            let proj = match cam.data.projection {
+                Some(usd_bevy::read::camera::Projection::Orthographic) => "ortho",
+                _ => "persp",
+            };
+            cam_labels.push(name.to_string());
+            cam_trailing.push(format!("{focal:.0}mm · {proj}"));
+            cam_paths.push(Some(cam.path.clone()));
+        }
+    }
+
+    let bm_cont = cid("cam_bm");
+    let cam_cont = cid("cam_all");
+    let mut save = false;
+    let mut jump: Option<usize> = None;
+    let mut delete: Option<usize> = None;
+    let mut mount_idx: Option<usize> = None;
+
     Pane::new(RIB_CAMERAS, "Cameras", pane_anchor_for(RIB_CAMERAS), accent_col)
         .resize(PaneResize::SPAN)
         .show(ctx, |body| {
-            let ui = body.ui();
-            section(ui, "cameras_bookmarks", "Bookmarks", accent_col, true, |ui| {
-                if wide_button(ui, "💾  Save current view", accent_col).clicked() {
-                    if let Ok(cam) = cameras.single() {
-                        let seq = bookmarks.next_seq + 1;
-                        bookmarks.next_seq = seq;
-                        bookmarks.items.push(CameraBookmark {
-                            name: format!("View {seq}"),
-                            focus: cam.focus,
-                            distance: cam.distance,
-                            yaw: cam.yaw,
-                            elevation: cam.elevation,
-                        });
-                    }
-                }
-                if bookmarks.items.is_empty() {
-                    sub_caption(ui, "(no bookmarks yet)");
-                } else {
-                    let mut to_delete: Option<usize> = None;
-                    let mut to_jump: Option<usize> = None;
-                    for (idx, bm) in bookmarks.items.iter().enumerate() {
-                        let r = hybrid_select_row(
-                            ui,
-                            ("bookmark", idx),
-                            &bm.name,
-                            Some(&format!("d {:.1}", bm.distance)),
-                            false,
-                            false,
-                            accent_col,
-                        );
-                        if r.body.clicked() {
-                            to_jump = Some(idx);
-                        }
-                        if r.radio.clicked() {
-                            to_delete = Some(idx);
-                        }
-                    }
-                    if let Some(idx) = to_jump
-                        && let (Ok(cam), Some(bm)) = (cameras.single(), bookmarks.items.get(idx))
-                    {
-                        *camera_mount = CameraMount::Arcball;
-                        fly.start_focus = cam.focus;
-                        fly.start_distance = cam.distance;
-                        fly.start_yaw = Some(cam.yaw);
-                        fly.start_elevation = Some(cam.elevation);
-                        fly.target_focus = bm.focus;
-                        fly.target_distance = bm.distance;
-                        fly.target_yaw = Some(bm.yaw);
-                        fly.target_elevation = Some(bm.elevation);
-                        fly.duration = 0.5;
-                        fly.remaining = 0.5;
-                    }
-                    if let Some(idx) = to_delete {
-                        bookmarks.items.remove(idx);
-                    }
-                    sub_caption(ui, "Click row to jump · click radio to delete");
-                }
-            });
-
-            section(ui, "cameras_all", "Cameras", accent_col, true, |ui| {
-                let asset = usd_assets.iter().next().map(|(_, a)| a);
-                let Some(asset) = asset else {
-                    sub_caption(ui, "(no stage loaded yet)");
-                    return;
-                };
-                sub_caption(ui, &format!("{} authored cameras", asset.cameras.len()));
-                ui.add_space(style::space::BLOCK);
-
-                let arcball_active = matches!(*camera_mount, CameraMount::Arcball);
-                let r = hybrid_select_row(
-                    ui,
-                    "arcball_mount",
-                    "🎮  Arcball (free)",
-                    None,
-                    arcball_active,
-                    arcball_active,
-                    accent_col,
+            let mut bm_pods = vec![Pod::new(pid("cam_bm", 0)).with_button("Save current view", accent_col)];
+            if bm_names.is_empty() {
+                bm_pods.push(Pod::new(pid("cam_bm", 1)).with_readout("bookmarks", "(none yet)"));
+            } else {
+                bm_pods.push(
+                    Pod::new(pid("cam_bm", 1)).with_hybrid_select_list(bm_names.clone(), Some(bm_trailing.clone()), accent_col),
                 );
-                if r.body.clicked() || r.radio.clicked() {
-                    *camera_mount = CameraMount::Arcball;
-                }
-
-                row_separator(ui);
-
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for cam in &asset.cameras {
-                        let mounted = matches!(
-                            &*camera_mount,
-                            CameraMount::Mounted { prim_path } if prim_path == &cam.path
-                        );
-                        let name = cam.path.rsplit('/').next().unwrap_or(&cam.path);
-                        let focal = cam.data.focal_length_mm.unwrap_or(50.0);
-                        let proj = match cam.data.projection {
-                            Some(usd_bevy::read::camera::Projection::Orthographic) => "ortho",
-                            _ => "persp",
-                        };
-                        let label = format!("📷  {name}");
-                        let trailing = format!("{focal:.0}mm · {proj}");
-                        let r = hybrid_select_row(
-                            ui,
-                            cam.path.as_str(),
-                            &label,
-                            Some(&trailing),
-                            mounted,
-                            mounted,
-                            accent_col,
-                        );
-                        if r.body.clicked() || r.radio.clicked() {
-                            *camera_mount = CameraMount::Mounted {
-                                prim_path: cam.path.clone(),
-                            };
-                        }
-                    }
-                });
-            });
+            }
+            body.add_normal(bm_cont, "Bookmarks", "history", bm_pods);
+            body.add_normal(
+                cam_cont,
+                "Cameras",
+                "cube",
+                vec![Pod::new(pid("cam_all", 0)).with_hybrid_select_list(cam_labels.clone(), Some(cam_trailing.clone()), accent_col)],
+            );
+            let r = body.render();
+            save = pod(&r, bm_cont, 0).and_then(|p| p.buttons.first()).is_some_and(|b| b.clicked);
+            if let Some(l) = pod(&r, bm_cont, 1).and_then(|p| p.hybrid_select_lists.first()) {
+                jump = l.body_clicked;
+                delete = l.radio_clicked;
+            }
+            if let Some(l) = pod(&r, cam_cont, 0).and_then(|p| p.hybrid_select_lists.first()) {
+                mount_idx = l.body_clicked.or(l.radio_clicked);
+            }
         });
+
+    if save && let Ok(cam) = cameras.single() {
+        let seq = bookmarks.next_seq + 1;
+        bookmarks.next_seq = seq;
+        bookmarks.items.push(CameraBookmark {
+            name: format!("View {seq}"),
+            focus: cam.focus,
+            distance: cam.distance,
+            yaw: cam.yaw,
+            elevation: cam.elevation,
+        });
+    }
+    if let Some(idx) = jump
+        && let (Ok(cam), Some(bm)) = (cameras.single(), bookmarks.items.get(idx))
+    {
+        *camera_mount = CameraMount::Arcball;
+        fly.start_focus = cam.focus;
+        fly.start_distance = cam.distance;
+        fly.start_yaw = Some(cam.yaw);
+        fly.start_elevation = Some(cam.elevation);
+        fly.target_focus = bm.focus;
+        fly.target_distance = bm.distance;
+        fly.target_yaw = Some(bm.yaw);
+        fly.target_elevation = Some(bm.elevation);
+        fly.duration = 0.5;
+        fly.remaining = 0.5;
+    }
+    if let Some(idx) = delete
+        && idx < bookmarks.items.len()
+    {
+        bookmarks.items.remove(idx);
+    }
+    if let Some(idx) = mount_idx {
+        *camera_mount = match cam_paths.get(idx).and_then(|p| p.clone()) {
+            Some(prim_path) => CameraMount::Mounted { prim_path },
+            None => CameraMount::Arcball,
+        };
+    }
 }
 
 // ─── Materials panel ────────────────────────────────────────────────
@@ -1634,68 +997,32 @@ fn draw_materials_panel(
     };
     let accent_col = accent.0;
 
-    let mut bound: std::collections::HashSet<AssetId<StandardMaterial>> =
-        std::collections::HashSet::new();
+    let mut bound: HashSet<AssetId<StandardMaterial>> = HashSet::new();
     for mm in usd_mesh_mats.iter() {
         bound.insert(mm.0.id());
     }
-
-    // Stable presentation order: by asset path / id.
-    let mut entries: Vec<(AssetId<StandardMaterial>, String)> = materials
+    let mut entries: Vec<(String, bool)> = materials
         .iter()
         .filter(|(id, _)| bound.contains(id))
-        .map(|(id, _)| {
-            let label = asset_server
-                .get_path(id)
-                .map(|p| p.to_string())
-                .unwrap_or_else(|| format!("{id:?}"));
-            (id, label)
+        .map(|(id, mat)| {
+            let label = asset_server.get_path(id).map(|p| p.to_string()).unwrap_or_else(|| format!("{id:?}"));
+            let short = label.rsplit('/').next().unwrap_or(&label).chars().take(48).collect::<String>();
+            (short, mat.base_color_texture.is_some())
         })
         .collect();
-    entries.sort_by(|a, b| a.1.cmp(&b.1));
+    entries.sort();
 
     Pane::new(RIB_MATERIALS, "Materials", pane_anchor_for(RIB_MATERIALS), accent_col)
         .resize(PaneResize::SPAN)
         .show(ctx, |body| {
-            let ui = body.ui();
-            section(
-                ui,
-                "materials_overview",
-                &format!("{} material(s)", entries.len()),
-                accent_col,
-                true,
-                |ui| {
-                    sub_caption(
-                        ui,
-                        "Read-only. Materials use the USD/default values; this panel does not tint colors or override metallic/roughness.",
-                    );
-                },
-            );
-            for (id, label) in &entries {
-                let short = label
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(label)
-                    .chars()
-                    .take(48)
-                    .collect::<String>();
-                let section_id = format!("mat_{:?}", id);
-                section(ui, &section_id, &short, accent_col, false, |ui| {
-                    let Some(mat) = materials.get(*id) else {
-                        return;
-                    };
-                    ui.label(egui::RichText::new(label).small().monospace());
-                    ui.add_space(style::space::BLOCK);
-                    let texture_state = if mat.base_color_texture.is_some() {
-                        "textured"
-                    } else {
-                        "constant color"
-                    };
-                    readout_row(ui, "Albedo", texture_state);
-                    readout_row(ui, "Roughness", "USD/default");
-                    readout_row(ui, "Metallic", "USD/default");
-                });
+            let mut pods = vec![Pod::new(pid("mat", 0)).with_readout("materials", entries.len().to_string())];
+            for (i, (name, textured)) in entries.iter().enumerate() {
+                pods.push(
+                    Pod::new(pid("mat", i + 1)).with_readout(name.as_str(), if *textured { "textured" } else { "constant color" }),
+                );
             }
+            body.add_normal(cid("mat"), "Bound materials", "color", pods);
+            body.render();
         });
 }
 
@@ -1715,57 +1042,70 @@ fn draw_overlays_panel(
         return;
     };
     let accent_col = accent.0;
+    let world = cid("ov_world");
+    let render = cid("ov_render");
+    let curves = cid("ov_curves");
+
+    let mut t = toggles.clone();
+    let mut lt = loader_tuning.clone();
     Pane::new(RIB_OVERLAYS, "Overlays", pane_anchor_for(RIB_OVERLAYS), accent_col)
         .resize(PaneResize::SPAN)
         .show(ctx, |body| {
-            let ui = body.ui();
-            section(ui, "overlay_toggles", "World overlays", accent_col, true, |ui| {
-                toggle(ui, "Ground grid (G)", &mut toggles.show_world_grid, accent_col);
-                toggle(ui, "World axes (X)", &mut toggles.show_world_axes, accent_col);
-                toggle(ui, "Prim markers (P)", &mut toggles.show_prim_markers, accent_col);
-                let mut v = toggles.prim_marker_bias as f64;
-                if pretty_slider(ui, "Prim marker bias", &mut v, 0.0..=5.0, 2, "×", accent_col)
-                    .changed()
-                {
-                    toggles.prim_marker_bias = v as f32;
-                }
-                toggle(ui, "Skeleton bones (B)", &mut toggles.show_skeleton, accent_col);
-                toggle(ui, "Physics gizmos (Y)", &mut toggles.show_physics, accent_col);
-                toggle(ui, "Collider wireframes (C)", &mut toggles.show_colliders, accent_col);
-            });
-
-            section(ui, "overlay_render", "Render", accent_col, true, |ui| {
-                toggle(ui, "Wireframe", &mut toggles.wireframe, accent_col);
-                let mut s = toggles.light_intensity_scale as f64;
-                if pretty_slider(ui, "Light intensity", &mut s, 0.0..=5.0, 2, "×", accent_col)
-                    .changed()
-                {
-                    toggles.light_intensity_scale = s as f32;
-                }
-                sub_caption(ui, "Scales every authored light from its original value.");
-            });
-
-            section(ui, "overlay_curves", "Curves (tubes)", accent_col, true, |ui| {
-                sub_caption(ui, "Default radius used when widths aren't authored");
-                let mut r = loader_tuning.curves.default_radius as f64;
-                if pretty_slider(ui, "Radius", &mut r, 0.001..=0.2, 3, " m", accent_col).changed() {
-                    loader_tuning.curves.default_radius = r as f32;
-                }
-                let mut seg = loader_tuning.curves.ring_segments as f64;
-                if pretty_slider(ui, "Ring segments", &mut seg, 3.0..=24.0, 0, "", accent_col)
-                    .changed()
-                {
-                    loader_tuning.curves.ring_segments = seg.round() as u32;
-                }
-                let mut ps = loader_tuning.curves.point_scale as f64;
-                if pretty_slider(ui, "Point scale", &mut ps, 0.05..=4.0, 2, "×", accent_col)
-                    .changed()
-                {
-                    loader_tuning.curves.point_scale = ps as f32;
-                }
-                sub_caption(ui, "Sliders apply live — no reload needed.");
-            });
+            body.add_normal(
+                world,
+                "World overlays",
+                "square-multiple",
+                vec![
+                    Pod::new(pid("ov_world", 0)).with_toggle_initial("Ground grid (G)", accent_col, t.show_world_grid),
+                    Pod::new(pid("ov_world", 1)).with_toggle_initial("World axes (X)", accent_col, t.show_world_axes),
+                    Pod::new(pid("ov_world", 2)).with_toggle_initial("Prim markers (P)", accent_col, t.show_prim_markers),
+                    Pod::new(pid("ov_world", 3)).with_slider("Prim marker bias", t.prim_marker_bias as f64, 0.0..=5.0, 2, "×", accent_col),
+                    Pod::new(pid("ov_world", 4)).with_toggle_initial("Skeleton bones (B)", accent_col, t.show_skeleton),
+                    Pod::new(pid("ov_world", 5)).with_toggle_initial("Physics gizmos (Y)", accent_col, t.show_physics),
+                    Pod::new(pid("ov_world", 6)).with_toggle_initial("Collider wireframes (C)", accent_col, t.show_colliders),
+                ],
+            );
+            body.add_normal(
+                render,
+                "Render",
+                "color",
+                vec![
+                    Pod::new(pid("ov_render", 0)).with_toggle_initial("Wireframe", accent_col, t.wireframe),
+                    Pod::new(pid("ov_render", 1)).with_slider("Light intensity", t.light_intensity_scale as f64, 0.0..=5.0, 2, "×", accent_col),
+                ],
+            );
+            body.add_normal(
+                curves,
+                "Curves (tubes)",
+                "options",
+                vec![
+                    Pod::new(pid("ov_curves", 0)).with_slider("Radius", lt.curves.default_radius as f64, 0.001..=0.2, 3, " m", accent_col),
+                    Pod::new(pid("ov_curves", 1)).with_slider("Ring segments", lt.curves.ring_segments as f64, 3.0..=24.0, 0, "", accent_col),
+                    Pod::new(pid("ov_curves", 2)).with_slider("Point scale", lt.curves.point_scale as f64, 0.05..=4.0, 2, "×", accent_col),
+                ],
+            );
+            let r = body.render();
+            let tog = |c, i: usize, cur: bool| -> bool {
+                pod(&r, c, i).and_then(|p| p.toggles.first()).filter(|x| x.changed).map(|x| x.on).unwrap_or(cur)
+            };
+            let sld = |c, i: usize, cur: f64| -> f64 {
+                pod(&r, c, i).and_then(|p| p.sliders.first()).filter(|x| x.changed).map(|x| x.value).unwrap_or(cur)
+            };
+            t.show_world_grid = tog(world, 0, t.show_world_grid);
+            t.show_world_axes = tog(world, 1, t.show_world_axes);
+            t.show_prim_markers = tog(world, 2, t.show_prim_markers);
+            t.prim_marker_bias = sld(world, 3, t.prim_marker_bias as f64) as f32;
+            t.show_skeleton = tog(world, 4, t.show_skeleton);
+            t.show_physics = tog(world, 5, t.show_physics);
+            t.show_colliders = tog(world, 6, t.show_colliders);
+            t.wireframe = tog(render, 0, t.wireframe);
+            t.light_intensity_scale = sld(render, 1, t.light_intensity_scale as f64) as f32;
+            lt.curves.default_radius = sld(curves, 0, lt.curves.default_radius as f64) as f32;
+            lt.curves.ring_segments = sld(curves, 1, lt.curves.ring_segments as f64).round() as u32;
+            lt.curves.point_scale = sld(curves, 2, lt.curves.point_scale as f64) as f32;
         });
+    *toggles = t;
+    *loader_tuning = lt;
 }
 
 // ─── Timeline panel ─────────────────────────────────────────────────
@@ -1784,44 +1124,51 @@ fn draw_timeline_panel(
         return;
     };
     let accent_col = accent.0;
+    let cont = cid("timeline");
+    let animated_count = usd_assets.iter().next().map(|(_, a)| a.animated_prims.len()).unwrap_or(0);
+    let dur = clock.duration_seconds().max(1e-3);
+    let summary = format!(
+        "{animated_count} animated · {:.1} fps · {:.1}s",
+        clock.time_codes_per_second,
+        clock.duration_seconds()
+    );
+    let play_label = if clock.playing { "Pause" } else { "Play" };
+
+    let mut play = false;
+    let mut rewind = false;
+    let mut new_secs: Option<f64> = None;
     Pane::new(RIB_TIMELINE, "Timeline", pane_anchor_for(RIB_TIMELINE), accent_col)
         .resize(PaneResize::SPAN)
         .show(ctx, |body| {
-            let ui = body.ui();
-            section(ui, "timeline_playback", "Playback", accent_col, true, |ui| {
-                let asset = usd_assets.iter().next().map(|(_, a)| a);
-                let animated_count = asset.map(|a| a.animated_prims.len()).unwrap_or(0);
-                sub_caption(
-                    ui,
-                    &format!(
-                        "{animated_count} animated prim(s) · {:.1} fps · {:.1}s total",
-                        clock.time_codes_per_second,
-                        clock.duration_seconds()
-                    ),
-                );
-                ui.add_space(style::space::BLOCK);
-
-                let play_label = if clock.playing { "⏸  Pause" } else { "▶  Play" };
-                if wide_button(ui, play_label, accent_col).clicked() {
-                    clock.playing = !clock.playing;
-                }
-                if wide_button(ui, "⏮  Rewind", accent_col).clicked() {
-                    clock.seconds = 0.0;
-                }
-
-                ui.add_space(style::space::BLOCK);
-                let dur = clock.duration_seconds().max(1e-3);
-                let _ = pretty_slider(ui, "Seconds", &mut clock.seconds, 0.0..=dur, 3, " s", accent_col);
-
-                readout_row(ui, "timeCode", &format!("{:.3}", clock.current_time_code()));
-                readout_row(
-                    ui,
-                    "range",
-                    &format!("{:.2} … {:.2}", clock.start_time_code, clock.end_time_code),
-                );
-                readout_row(ui, "fps", &format!("{:.2}", clock.time_codes_per_second));
-            });
+            body.add_normal(
+                cont,
+                "Playback",
+                "clock",
+                vec![
+                    Pod::new(pid("timeline", 0)).with_readout("clip", summary.clone()),
+                    Pod::new(pid("timeline", 1)).with_button(play_label, accent_col),
+                    Pod::new(pid("timeline", 2)).with_button("Rewind", accent_col),
+                    Pod::new(pid("timeline", 3)).with_slider("Seconds", clock.seconds, 0.0..=dur, 3, " s", accent_col),
+                    Pod::new(pid("timeline", 4)).with_readout("timeCode", format!("{:.3}", clock.current_time_code())),
+                    Pod::new(pid("timeline", 5)).with_readout("fps", format!("{:.2}", clock.time_codes_per_second)),
+                ],
+            );
+            let r = body.render();
+            play = pod(&r, cont, 1).and_then(|p| p.buttons.first()).is_some_and(|b| b.clicked);
+            rewind = pod(&r, cont, 2).and_then(|p| p.buttons.first()).is_some_and(|b| b.clicked);
+            if let Some(s) = pod(&r, cont, 3).and_then(|p| p.sliders.first()).filter(|s| s.changed) {
+                new_secs = Some(s.value);
+            }
         });
+    if play {
+        clock.playing = !clock.playing;
+    }
+    if rewind {
+        clock.seconds = 0.0;
+    }
+    if let Some(s) = new_secs {
+        clock.seconds = s;
+    }
 }
 
 // ─── Keys panel ─────────────────────────────────────────────────────
@@ -1837,27 +1184,40 @@ fn draw_keys_panel(mut contexts: EguiContexts, open: Res<RibbonOpen>, accent: Re
     Pane::new(RIB_KEYS, "Controls", pane_anchor_for(RIB_KEYS), accent_col)
         .resize(PaneResize::SPAN)
         .show(ctx, |body| {
-            let ui = body.ui();
-            section(ui, "keys_camera", "Camera", accent_col, true, |ui| {
-                keybinding_row(ui, "L+R drag", "Orbit");
-                keybinding_row(ui, "Middle", "Pan");
-                keybinding_row(ui, "Scroll", "Zoom");
-            });
-            section(ui, "keys_panels", "Panels", accent_col, true, |ui| {
-                keybinding_row(ui, "T", "Toggle prim tree");
-                keybinding_row(ui, "I", "Toggle stage info");
-                keybinding_row(ui, "O", "Toggle overlays");
-                keybinding_row(ui, "?", "Toggle this panel");
-            });
-            section(ui, "keys_overlays", "Overlays", accent_col, true, |ui| {
-                keybinding_row(ui, "G", "Ground grid");
-                keybinding_row(ui, "X", "World axes");
-                keybinding_row(ui, "P", "Prim markers");
-                keybinding_row(ui, "B", "Skeleton bones");
-            });
-            section(ui, "keys_stage", "Stage", accent_col, true, |ui| {
-                keybinding_row(ui, "R", "Reload stage from disk");
-            });
+            body.add_normal(
+                cid("keys_cam"),
+                "Camera",
+                "keyboard",
+                vec![Pod::new(pid("keys_cam", 0)).with_keybindings(vec![
+                    ("L+R drag", "Orbit"),
+                    ("Middle", "Pan"),
+                    ("Scroll", "Zoom"),
+                ])],
+            );
+            body.add_normal(
+                cid("keys_panels"),
+                "Panels",
+                "keyboard",
+                vec![Pod::new(pid("keys_panels", 0)).with_keybindings(vec![
+                    ("T", "Toggle prim tree"),
+                    ("I", "Toggle stage info"),
+                    ("O", "Toggle overlays"),
+                    ("?", "Toggle this panel"),
+                ])],
+            );
+            body.add_normal(
+                cid("keys_ov"),
+                "Overlays",
+                "keyboard",
+                vec![Pod::new(pid("keys_ov", 0)).with_keybindings(vec![
+                    ("G", "Ground grid"),
+                    ("X", "World axes"),
+                    ("P", "Prim markers"),
+                    ("B", "Skeleton bones"),
+                    ("R", "Reload stage"),
+                ])],
+            );
+            body.render();
         });
 }
 
@@ -1876,72 +1236,29 @@ fn draw_log_panel(
         return;
     };
     let accent_col = accent.0;
+    let cont = cid("log");
+    let lines: Vec<crate::log_panel::LogLine> = log
+        .buffer
+        .lock()
+        .map(|b| b.iter().rev().take(80).cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+
     Pane::new(RIB_LOG, "Log", pane_anchor_for(RIB_LOG), accent_col)
         .resize(PaneResize::SPAN)
         .show(ctx, |body| {
-            let ui = body.ui();
-            section(ui, "log_lines", "Loader log", accent_col, true, |ui| {
-                let count = log.buffer.lock().map(|b| b.len()).unwrap_or(0);
-                sub_caption(ui, &format!("{count} entries · capped at 500"));
-                ui.horizontal(|ui| {
-                    if ui.small_button("Clear").clicked()
-                        && let Ok(mut buf) = log.buffer.lock()
-                    {
-                        buf.clear();
-                    }
-                });
-                ui.add_space(style::space::TIGHT);
-
-                egui::ScrollArea::vertical()
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        let snapshot: Vec<crate::log_panel::LogLine> = log
-                            .buffer
-                            .lock()
-                            .map(|b| b.iter().cloned().collect())
-                            .unwrap_or_default();
-                        if snapshot.is_empty() {
-                            sub_caption(ui, "(no events yet — load a stage)");
-                            return;
-                        }
-                        for line in &snapshot {
-                            let level_color = level_to_color(line.level);
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 4.0;
-                                ui.painter().rect_filled(
-                                    egui::Rect::from_center_size(
-                                        ui.cursor().min + egui::vec2(4.0, 8.0),
-                                        egui::vec2(6.0, 6.0),
-                                    ),
-                                    egui::CornerRadius::same(1),
-                                    level_color,
-                                );
-                                ui.add_space(10.0);
-                                ui.label(
-                                    egui::RichText::new(short_target(&line.target))
-                                        .small()
-                                        .monospace()
-                                        .color(style::TEXT_SECONDARY),
-                                );
-                                ui.label(
-                                    egui::RichText::new(&line.message)
-                                        .small()
-                                        .color(style::TEXT_PRIMARY),
-                                );
-                            });
-                        }
-                    });
-            });
+            let mut pods = vec![Pod::new(pid("log", 0)).with_readout("entries", lines.len().to_string())];
+            if lines.is_empty() {
+                pods.push(Pod::new(pid("log", 1)).with_readout("log", "(no events yet — load a stage)"));
+            } else {
+                for (i, line) in lines.iter().enumerate() {
+                    pods.push(
+                        Pod::new(pid("log", i + 1)).with_readout(short_target(&line.target), line.message.as_str()),
+                    );
+                }
+            }
+            body.add_normal(cont, "Loader log", "list", pods);
+            body.render();
         });
-}
-
-fn level_to_color(level: bevy::log::Level) -> egui::Color32 {
-    match level {
-        bevy::log::Level::ERROR => style::DANGER,
-        bevy::log::Level::WARN => style::WARNING,
-        bevy::log::Level::INFO => style::SUCCESS,
-        _ => style::TEXT_SECONDARY,
-    }
 }
 
 fn short_target(target: &str) -> String {
@@ -1967,48 +1284,20 @@ fn draw_palette_panel(
         return;
     };
     match id {
-        "open_selection" => {
-            ribbon.per_ribbon.insert(RIBBON_LEFT, RIB_SELECTION);
-        }
-        "open_tree" => {
-            ribbon.per_ribbon.insert(RIBBON_LEFT, RIB_TREE);
-        }
-        "open_info" => {
-            ribbon.per_ribbon.insert(RIBBON_LEFT, RIB_INFO);
-        }
-        "open_variants" => {
-            ribbon.per_ribbon.insert(RIBBON_LEFT, RIB_VARIANTS);
-        }
-        "open_cameras" => {
-            ribbon.per_ribbon.insert(RIBBON_LEFT, RIB_CAMERAS);
-        }
-        "open_overlays" => {
-            ribbon.per_ribbon.insert(RIBBON_LEFT, RIB_OVERLAYS);
-        }
-        "open_timeline" => {
-            ribbon.per_ribbon.insert(RIBBON_LEFT, RIB_TIMELINE);
-        }
-        "open_keys" => {
-            ribbon.per_ribbon.insert(RIBBON_LEFT, RIB_KEYS);
-        }
-        "open_log" => {
-            ribbon.per_ribbon.insert(RIBBON_LEFT, RIB_LOG);
-        }
-        "toggle_grid" => {
-            toggles.show_world_grid = !toggles.show_world_grid;
-        }
-        "toggle_axes" => {
-            toggles.show_world_axes = !toggles.show_world_axes;
-        }
-        "toggle_markers" => {
-            toggles.show_prim_markers = !toggles.show_prim_markers;
-        }
-        "toggle_wireframe" => {
-            toggles.wireframe = !toggles.wireframe;
-        }
-        "reload_stage" => {
-            reload.requested = true;
-        }
+        "open_selection" => { ribbon.per_ribbon.insert(RIBBON_LEFT, RIB_SELECTION); }
+        "open_tree" => { ribbon.per_ribbon.insert(RIBBON_LEFT, RIB_TREE); }
+        "open_info" => { ribbon.per_ribbon.insert(RIBBON_LEFT, RIB_INFO); }
+        "open_variants" => { ribbon.per_ribbon.insert(RIBBON_LEFT, RIB_VARIANTS); }
+        "open_cameras" => { ribbon.per_ribbon.insert(RIBBON_LEFT, RIB_CAMERAS); }
+        "open_overlays" => { ribbon.per_ribbon.insert(RIBBON_LEFT, RIB_OVERLAYS); }
+        "open_timeline" => { ribbon.per_ribbon.insert(RIBBON_LEFT, RIB_TIMELINE); }
+        "open_keys" => { ribbon.per_ribbon.insert(RIBBON_LEFT, RIB_KEYS); }
+        "open_log" => { ribbon.per_ribbon.insert(RIBBON_LEFT, RIB_LOG); }
+        "toggle_grid" => toggles.show_world_grid = !toggles.show_world_grid,
+        "toggle_axes" => toggles.show_world_axes = !toggles.show_world_axes,
+        "toggle_markers" => toggles.show_prim_markers = !toggles.show_prim_markers,
+        "toggle_wireframe" => toggles.wireframe = !toggles.wireframe,
+        "reload_stage" => reload.requested = true,
         "browse_usd" => {
             if let Some(picked) = rfd::FileDialog::new()
                 .add_filter("USD stages", &["usda", "usdc", "usd", "usdz"])
