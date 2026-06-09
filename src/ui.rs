@@ -1,15 +1,14 @@
-//! Viewer UI — bevy_frost ribbons + floating panels + widgets.
+//! Viewer UI — mara ribbons + rail-anchored panes + widgets.
 //!
-//! Left rail is one `TwoSided` panel ribbon. Primary tools live in the
-//! `Start` cluster (top-anchored); utility/help tools live in the `End`
-//! cluster (bottom-anchored). Panel visibility is driven by the
-//! `RibbonOpen` resource that frost ships with — clicking a rail button
-//! toggles exclusively.
+//! Left rail is one `ThreeSided` panel ribbon. Primary tools live in
+//! the `Start` cluster (top), the play toggle in `Middle`, utility/help
+//! in `End` (bottom). Panel visibility is driven by mara's `RibbonOpen`
+//! resource — clicking a rail button toggles its pane exclusively
+//! (one open pane per ribbon).
 //!
-//! PaneBuilder constraint: every pane body may ONLY call
-//! `pane.section(id, title, default_open, body)`. Any free-standing
-//! widget (sub_caption, readout_row, ScrollArea, …) must live inside
-//! that body — which receives a regular `&mut egui::Ui`.
+//! Each pane body paints imperatively via `body.ui()` (mara's
+//! immediate escape hatch) using mara_core widgets, so the panel code
+//! reads like the old bevy_frost version.
 
 use bevy::asset::Assets;
 use bevy::ecs::hierarchy::Children;
@@ -17,9 +16,22 @@ use bevy::mesh::Mesh3d;
 use bevy::pbr::{MeshMaterial3d, StandardMaterial};
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
-use bevy_frost::prelude::*;
-use bevy_frost::style;
-use bevy_frost::widgets::section as nested_section;
+use bevy_mara::prelude::*;
+use mara_core::pane::{Pane, PaneAnchor, PaneResize, RailZone};
+use mara_core::ribbon::{
+    RibbonAction, RibbonCluster, RibbonDrag, RibbonEdge, RibbonGlyph, RibbonMode, RibbonOpen,
+    RibbonPlacement, RibbonRole, RibbonSlotClick, RibbonSlotItem, ResolvedSlotRibbon,
+    draw_slot_ribbons_featureful,
+};
+use mara_core::style;
+use mara_core::style::AccentColor;
+use mara_core::widget::section;
+use mara_core::widget::{
+    TreeIconKind, TreeIconSlot, badge_row, chip, chip_colored, context_menu_mara,
+    hybrid_select_row, keybinding_row, labelled_row, pretty_slider, readout_row, row_separator,
+    search_field, sub_caption, toggle, tree_row, wide_button,
+};
+use mara_core::{CommandPaletteState, PaletteItem, command_palette};
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::path::PathBuf;
@@ -48,122 +60,159 @@ pub const RIB_KEYS: &str = "viewer_keys";
 pub const RIB_LOG: &str = "viewer_log";
 pub const RIB_PLAY: &str = "viewer_play";
 
-const RIBBONS: &[RibbonDef] = &[RibbonDef {
+/// A ribbon rail (mara `ResolvedSlotRibbon`s are built from this per frame).
+#[derive(Clone, Copy)]
+struct RibbonSpec {
+    id: &'static str,
+    edge: RibbonEdge,
+    role: RibbonRole,
+    mode: RibbonMode,
+    accepts: &'static [&'static str],
+}
+
+/// A ribbon button (a pane toggle, or an `Icon`-role action).
+#[derive(Clone, Copy)]
+struct RibbonButtonSpec {
+    id: &'static str,
+    ribbon: &'static str,
+    cluster: RibbonCluster,
+    // Documents intended order within a cluster; mara paints in
+    // declaration order, so this isn't read at runtime.
+    #[allow(dead_code)]
+    slot: u32,
+    draggable: bool,
+    glyph: RibbonGlyph,
+    tooltip: &'static str,
+    child_ribbon: Option<&'static str>,
+    role: Option<RibbonRole>,
+}
+
+const RIBBONS: &[RibbonSpec] = &[RibbonSpec {
     id: RIBBON_LEFT,
     edge: RibbonEdge::Left,
     role: RibbonRole::Panel,
     mode: RibbonMode::ThreeSided,
-    draggable: false,
     accepts: &[],
 }];
 
-const RIBBON_ITEMS: &[RibbonItem] = &[
-    RibbonItem {
+const RIBBON_ITEMS: &[RibbonButtonSpec] = &[
+    RibbonButtonSpec {
         id: RIB_SELECTION,
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::Start,
         slot: 0,
-        glyph: bevy_frost::RibbonGlyph::Text("F"),
+        draggable: false,
+        glyph: RibbonGlyph::Text("F"),
         tooltip: "File / selection",
         child_ribbon: None,
         role: None,
     },
-    RibbonItem {
+    RibbonButtonSpec {
         id: RIB_TREE,
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::Start,
         slot: 1,
-        glyph: bevy_frost::RibbonGlyph::Text("T"),
+        draggable: false,
+        glyph: RibbonGlyph::Text("T"),
         tooltip: "Prim tree (T)",
         child_ribbon: None,
         role: None,
     },
-    RibbonItem {
+    RibbonButtonSpec {
         id: RIB_INFO,
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::Start,
         slot: 2,
-        glyph: bevy_frost::RibbonGlyph::Text("i"),
+        draggable: false,
+        glyph: RibbonGlyph::Text("i"),
         tooltip: "Stage info (I)",
         child_ribbon: None,
         role: None,
     },
-    RibbonItem {
+    RibbonButtonSpec {
         id: RIB_VARIANTS,
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::Start,
         slot: 3,
-        glyph: bevy_frost::RibbonGlyph::Text("V"),
+        draggable: false,
+        glyph: RibbonGlyph::Text("V"),
         tooltip: "Variants",
         child_ribbon: None,
         role: None,
     },
-    RibbonItem {
+    RibbonButtonSpec {
         id: RIB_CAMERAS,
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::Start,
         slot: 4,
-        glyph: bevy_frost::RibbonGlyph::Text("C"),
+        draggable: false,
+        glyph: RibbonGlyph::Text("C"),
         tooltip: "Cameras",
         child_ribbon: None,
         role: None,
     },
-    RibbonItem {
+    RibbonButtonSpec {
         id: RIB_MATERIALS,
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::Start,
         slot: 5,
-        glyph: bevy_frost::RibbonGlyph::Text("M"),
+        draggable: false,
+        glyph: RibbonGlyph::Text("M"),
         tooltip: "Materials",
         child_ribbon: None,
         role: None,
     },
-    RibbonItem {
+    RibbonButtonSpec {
         id: RIB_PLAY,
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::Middle,
         slot: 0,
-        glyph: bevy_frost::RibbonGlyph::Text("▶"),
+        draggable: false,
+        glyph: RibbonGlyph::Text("▶"),
         tooltip: "Play / pause physics",
         child_ribbon: None,
-        role: Some(bevy_frost::RibbonRole::Icon),
+        role: Some(RibbonRole::Icon),
     },
-    RibbonItem {
+    RibbonButtonSpec {
         id: RIB_OVERLAYS,
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::End,
         slot: 0,
-        glyph: bevy_frost::RibbonGlyph::Text("O"),
+        draggable: false,
+        glyph: RibbonGlyph::Text("O"),
         tooltip: "Overlays (O)",
         child_ribbon: None,
         role: None,
     },
-    RibbonItem {
+    RibbonButtonSpec {
         id: RIB_TIMELINE,
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::End,
         slot: 1,
-        glyph: bevy_frost::RibbonGlyph::Text("⏱"),
+        draggable: false,
+        glyph: RibbonGlyph::Text("⏱"),
         tooltip: "Timeline",
         child_ribbon: None,
         role: None,
     },
-    RibbonItem {
+    RibbonButtonSpec {
         id: RIB_KEYS,
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::End,
         slot: 2,
-        glyph: bevy_frost::RibbonGlyph::Text("?"),
+        draggable: false,
+        glyph: RibbonGlyph::Text("?"),
         tooltip: "Controls (?)",
         child_ribbon: None,
         role: None,
     },
-    RibbonItem {
+    RibbonButtonSpec {
         id: RIB_LOG,
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::End,
         slot: 3,
-        glyph: bevy_frost::RibbonGlyph::Text("📜"),
+        draggable: false,
+        glyph: RibbonGlyph::Text("📜"),
         tooltip: "Log",
         child_ribbon: None,
         role: None,
@@ -181,13 +230,13 @@ pub struct TreeExpanded(pub HashMap<String, bool>);
 #[derive(Resource, Default)]
 pub struct TreeFilter(pub String);
 
-/// Wrapper around frost's `CommandPaletteState` so Bevy can track it
+/// Wrapper around mara's `CommandPaletteState` so Bevy can track it
 /// as a Resource without needing to derive on an upstream type.
 #[derive(Resource, Default)]
 pub struct ViewerCommandPalette(pub CommandPaletteState);
 
 /// The palette's static action list. Adding a new id here only
-/// requires a matching arm in `dispatch_palette` below.
+/// requires a matching arm in the dispatch below.
 const PALETTE_ITEMS: &[PaletteItem] = &[
     PaletteItem {
         id: "open_selection",
@@ -266,14 +315,97 @@ const PALETTE_ITEMS: &[PaletteItem] = &[
     },
 ];
 
+// ─── Ribbon helpers ─────────────────────────────────────────────────
+
+fn ribbon_action(id: &'static str) -> RibbonAction {
+    RibbonAction::Command(egui::Id::new(id))
+}
+
+/// Rail-anchor for a pane, derived from its ribbon button's cluster.
+/// All viewer panes live on the left rail.
+fn pane_anchor_for(item_id: &'static str) -> PaneAnchor {
+    let zone = RIBBON_ITEMS
+        .iter()
+        .find(|i| i.id == item_id)
+        .map(|i| match i.cluster {
+            RibbonCluster::Start => RailZone::Start,
+            RibbonCluster::Middle => RailZone::Middle,
+            RibbonCluster::End => RailZone::End,
+        })
+        .unwrap_or(RailZone::Start);
+    PaneAnchor::LeftRail(zone)
+}
+
+/// Build mara `ResolvedSlotRibbon`s from the static specs and paint
+/// them. Panel-role buttons toggle their pane's `RibbonOpen` state
+/// internally; `Icon`-role buttons (play) surface as clicks.
+fn draw_unified_ribbons(
+    ctx: &egui::Context,
+    accent: egui::Color32,
+    ribbons: &[RibbonSpec],
+    items: &[RibbonButtonSpec],
+    open: &mut RibbonOpen,
+    placement: &mut RibbonPlacement,
+    drag: &mut RibbonDrag,
+    active: impl Fn(&'static str) -> bool,
+) -> Vec<RibbonSlotClick> {
+    let mut resolved = Vec::new();
+    for ribbon in ribbons {
+        for cluster in [
+            RibbonCluster::Start,
+            RibbonCluster::Middle,
+            RibbonCluster::End,
+        ] {
+            let slot_items: Vec<RibbonSlotItem> = items
+                .iter()
+                .filter(|item| item.ribbon == ribbon.id && item.cluster == cluster)
+                .map(|item| {
+                    let icon = match item.glyph {
+                        RibbonGlyph::Icon(i) | RibbonGlyph::Text(i) | RibbonGlyph::Svg(i) => i,
+                    };
+                    let mut slot = RibbonSlotItem::featureful(
+                        item.id,
+                        icon,
+                        item.id,
+                        item.tooltip,
+                        ribbon_action(item.id),
+                    )
+                    .with_role(item.role.unwrap_or(ribbon.role));
+                    if let Some(child) = item.child_ribbon {
+                        slot = slot.with_child_ribbon(child);
+                    }
+                    slot.draggable = item.draggable;
+                    slot.active = active(item.id);
+                    slot
+                })
+                .collect();
+            if slot_items.is_empty() {
+                continue;
+            }
+            resolved.push(ResolvedSlotRibbon {
+                id: egui::Id::new((ribbon.id, cluster)),
+                chrome_id: Some(ribbon.id),
+                scope: mara_core::RibbonScope::Permanent,
+                edge: ribbon.edge,
+                role: ribbon.role,
+                mode: ribbon.mode,
+                cluster,
+                accepts: ribbon.accepts,
+                items: slot_items,
+            });
+        }
+    }
+    draw_slot_ribbons_featureful(ctx, accent, &resolved, open, placement, drag)
+}
+
 // ─── Plugin ─────────────────────────────────────────────────────────
 
 pub struct ViewerUiPlugin;
 
 impl Plugin for ViewerUiPlugin {
     fn build(&self, app: &mut App) {
-        if !app.is_plugin_added::<bevy_frost::FrostPlugin>() {
-            app.add_plugins(bevy_frost::FrostPlugin);
+        if !app.is_plugin_added::<MaraPlugin>() {
+            app.add_plugins(MaraPlugin);
         }
         app.init_resource::<TreeExpanded>()
             .init_resource::<TreeFilter>()
@@ -281,7 +413,9 @@ impl Plugin for ViewerUiPlugin {
             .add_systems(
                 EguiPrimaryContextPass,
                 (
-                    draw_ribbons,
+                    // Panes paint first; the ribbon assembly registers
+                    // last so its `Area`s layer above the panes. Click
+                    // handling updates `RibbonOpen` for the next frame.
                     draw_selection_panel,
                     draw_tree_panel,
                     draw_info_panel,
@@ -293,14 +427,13 @@ impl Plugin for ViewerUiPlugin {
                     draw_keys_panel,
                     draw_log_panel,
                     draw_palette_panel,
+                    draw_ribbons,
                 )
-                    .chain(),
+                    .chain()
+                    .after(RibbonGhostSet),
             );
     }
 }
-
-const PANEL_W: f32 = 340.0;
-const PANEL_H: f32 = 560.0;
 
 // ─── Ribbon rail ────────────────────────────────────────────────────
 
@@ -316,7 +449,7 @@ fn draw_ribbons(
         return;
     };
     let physics_on = physics.0;
-    let clicks = draw_assembly(
+    let clicks = draw_unified_ribbons(
         ctx,
         accent.0,
         RIBBONS,
@@ -327,7 +460,7 @@ fn draw_ribbons(
         |id| id == RIB_PLAY && physics_on,
     );
     for click in clicks {
-        if click.item == RIB_PLAY {
+        if click.item == egui::Id::new(RIB_PLAY) {
             physics.0 = !physics.0;
         }
     }
@@ -343,7 +476,6 @@ fn is_panel_open(open: &RibbonOpen, item: &'static str) -> bool {
 fn draw_selection_panel(
     mut contexts: EguiContexts,
     open: Res<RibbonOpen>,
-    placement: Res<RibbonPlacement>,
     accent: Res<AccentColor>,
     info: Res<StageInfo>,
     requested: Res<crate::RequestedAsset>,
@@ -364,19 +496,11 @@ fn draw_selection_panel(
         return;
     };
     let accent_col = accent.0;
-    let mut keep = true;
-    floating_window_for_item(
-        ctx,
-        RIBBONS,
-        RIBBON_ITEMS,
-        &placement,
-        RIB_SELECTION,
-        "Selection",
-        egui::vec2(PANEL_W, PANEL_H),
-        &mut keep,
-        accent_col,
-        |pane| {
-            pane.section("sel_stage", "Loaded stage", true, |ui| {
+    Pane::new(RIB_SELECTION, "Selection", pane_anchor_for(RIB_SELECTION), accent_col)
+        .resize(PaneResize::SPAN)
+        .show(ctx, |body| {
+            let ui = body.ui();
+            section(ui, "sel_stage", "Loaded stage", accent_col, true, |ui| {
                 readout_row(ui, "file", info.path.as_str());
                 if wide_button(ui, "📁  Browse USD…", accent_col).clicked()
                     && let Some(picked) = rfd::FileDialog::new()
@@ -391,7 +515,7 @@ fn draw_selection_panel(
                     let _ = std::process::Command::new("xdg-open").arg(&target).spawn();
                 }
             });
-            pane.section("sel_prim", "Selected prim", true, |ui| match selected.0 {
+            section(ui, "sel_prim", "Selected prim", accent_col, true, |ui| match selected.0 {
                 Some(entity) => {
                     if let Ok((_, n, pr)) = prims.get(entity) {
                         readout_row(ui, "name", n.as_str());
@@ -399,8 +523,7 @@ fn draw_selection_panel(
 
                         // Feature chips — derived purely from ECS
                         // component presence so the row stays in sync
-                        // with the live stage without a dedicated
-                        // cache.
+                        // with the live stage without a dedicated cache.
                         ui.horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing.x = 3.0;
                             if mesh_q.get(entity).is_ok() {
@@ -433,8 +556,7 @@ fn draw_selection_panel(
                 }
                 None => sub_caption(ui, "Click a prim in the Tree panel"),
             });
-        },
-    );
+        });
 }
 
 // ─── Prim-tree panel ────────────────────────────────────────────────
@@ -443,7 +565,6 @@ fn draw_selection_panel(
 fn draw_tree_panel(
     mut contexts: EguiContexts,
     open: Res<RibbonOpen>,
-    placement: Res<RibbonPlacement>,
     accent: Res<AccentColor>,
     mut selected: ResMut<SelectedPrim>,
     mut fly: ResMut<FlyTo>,
@@ -453,10 +574,6 @@ fn draw_tree_panel(
     cameras: Query<&ArcballCamera>,
     gt_query: Query<&GlobalTransform>,
     extent_q: Query<&usd_bevy::UsdLocalExtent>,
-    // Combined with `Option<&UsdDisplayName>` so the system stays
-    // under Bevy's 16-SystemParam limit. The recursive row helper
-    // pulls the display name via `prims.get(entity)` instead of
-    // a separate query.
     prims: Query<(Entity, &Name, &UsdPrimRef, Option<&UsdDisplayName>)>,
     mat_q: Query<&MeshMaterial3d<StandardMaterial>>,
     mut visibility_q: Query<(Entity, &mut Visibility)>,
@@ -469,47 +586,30 @@ fn draw_tree_panel(
         return;
     };
     let accent_col = accent.0;
-    let mut keep = true;
-    floating_window_for_item(
-        ctx,
-        RIBBONS,
-        RIBBON_ITEMS,
-        &placement,
-        RIB_TREE,
-        "Prim tree",
-        egui::vec2(PANEL_W, 720.0),
-        &mut keep,
-        accent_col,
-        |pane| {
-            pane.section("tree_hierarchy", "Hierarchy", true, |ui| {
+    Pane::new(RIB_TREE, "Prim tree", pane_anchor_for(RIB_TREE), accent_col)
+        .resize(PaneResize::SPAN)
+        .show(ctx, |body| {
+            let ui = body.ui();
+            section(ui, "tree_hierarchy", "Hierarchy", accent_col, true, |ui| {
                 sub_caption(ui, &format!("{} prims", prims.iter().count()));
                 ui.add_space(style::space::TIGHT);
                 search_field(ui, &mut filter.0, "Search prims…", accent_col);
                 ui.add_space(style::space::BLOCK);
 
                 // Snapshot the current Visibility state so the tree
-                // rows can drive eye-icon toggles via plain &mut bool
-                // — we commit changes back to the ECS once the row
+                // rows can drive eye-icon toggles via plain &mut bool —
+                // we commit changes back to the ECS once the row
                 // rendering is finished.
                 let mut vis_cache: HashMap<Entity, bool> = HashMap::new();
                 for (e, v) in visibility_q.iter() {
                     vis_cache.insert(e, !matches!(*v, Visibility::Hidden));
                 }
-                // `visibility_q.get_mut(e)` below returns
-                // `Result<(Entity, Mut<Visibility>)>`; we only need
-                // the Mut half, hence the destructuring pattern.
                 let vis_before = vis_cache.clone();
 
                 let filter_lc = filter.0.to_lowercase();
                 let flat = !filter_lc.is_empty();
 
                 let mut outcome = RowOutcome::default();
-                // Hardcoded generous viewport — frost's `section`
-                // allocates the body Ui with initial height 0, so
-                // `available_height` here would clip the scroll list
-                // to almost nothing. 600 px gives ~30 visible rows
-                // at the default `TREE_ROW_H = 20`; the panel itself
-                // opens 720 px tall so this fits without overflow.
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .min_scrolled_height(600.0)
@@ -681,8 +781,7 @@ fn draw_tree_panel(
                     }
                 }
             });
-        },
-    );
+        });
 }
 
 #[derive(Default, Clone, Copy)]
@@ -715,8 +814,7 @@ impl RowOutcome {
 }
 
 /// Walk the subtree rooted at `root` and set each descendant's
-/// `TreeExpanded` entry to `open`. Used by the row context-menu
-/// "Expand / Collapse descendants" actions.
+/// `TreeExpanded` entry to `open`.
 fn set_subtree_expanded(
     root: Entity,
     prims: &Query<(Entity, &Name, &UsdPrimRef, Option<&UsdDisplayName>)>,
@@ -737,9 +835,9 @@ fn set_subtree_expanded(
     }
 }
 
-/// Lookup the first-bound material's `base_color` for `entity` (or
-/// one of its direct mesh-carrying children) and convert linear sRGB
-/// into an egui colour suitable for a tree-row swatch.
+/// Lookup the first-bound material's `base_color` for `entity` (or one
+/// of its direct mesh-carrying children) and convert linear sRGB into
+/// an egui colour suitable for a tree-row swatch.
 fn swatch_color_for(
     entity: Entity,
     mat_q: &Query<&MeshMaterial3d<StandardMaterial>>,
@@ -781,8 +879,6 @@ fn draw_tree_row(
     expanded: &mut TreeExpanded,
     accent: egui::Color32,
     depth: u32,
-    // Force a leaf-style row (no chevron, no descendants). Used by
-    // the flat filter mode where we render ancestorless hits.
     leaf_override: bool,
 ) -> RowOutcome {
     let child_ids: Vec<Entity> = children
@@ -798,13 +894,6 @@ fn draw_tree_row(
 
     let is_selected = selected.0 == Some(entity);
     let path_key = prim_ref.path.clone();
-    // Tree-row egui id: entity's bits, NOT the prim path. Production
-    // assets (Davinci, PointInstancer expansion, internal-reference
-    // dedup) routinely produce multiple entities sharing one prim
-    // path; using the path as id_salt collides those rows in egui's
-    // internal id arena and blasts the console with "ID is not
-    // unique" warnings. Entity IDs are guaranteed unique within the
-    // ECS world — perfect.
     let row_id_salt = entity.to_bits();
     let mut outcome = RowOutcome::default();
 
@@ -814,8 +903,7 @@ fn draw_tree_row(
     let mut color_sentinel = false;
 
     // Label preference: authored `ui:displayName` (UsdUI) > prim leaf
-    // name. Most stages won't author a display name and fall straight
-    // through to the leaf.
+    // name.
     let label_owned: String = display_name
         .map(|d| d.0.clone())
         .unwrap_or_else(|| name.as_str().to_string());
@@ -827,10 +915,7 @@ fn draw_tree_row(
                 .with_tooltip("Toggle visibility"),
         );
         if let Some(c) = swatch {
-            slot_buf.push(TreeIconSlot::new(
-                TreeIconKind::Color(c),
-                &mut color_sentinel,
-            ));
+            slot_buf.push(TreeIconSlot::new(TreeIconKind::Color(c), &mut color_sentinel));
         }
 
         if has_children {
@@ -866,8 +951,6 @@ fn draw_tree_row(
         }
     };
 
-    // Write the eye state back to the cache; the panel commits it
-    // to the ECS after all rows have rendered.
     vis_cache.insert(entity, visible_flag);
 
     if resp.body.hovered() {
@@ -879,7 +962,7 @@ fn draw_tree_row(
         outcome.clicked = Some(entity);
     }
 
-    context_menu_frost(&resp.body, accent, |ui| {
+    context_menu_mara(&resp.body, accent, |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
         if wide_button(ui, "Fly to", accent).clicked() {
             outcome.ctx_action = Some(CtxAction::FlyTo(entity));
@@ -936,8 +1019,7 @@ fn draw_tree_row(
 
 /// Walk the subtree rooted at `root`, transforming each descendant's
 /// authored local extent into world space, and fold into one AABB.
-/// Returns `(focus, distance)` sized for arcball framing. When no
-/// descendant carries `UsdLocalExtent`, falls back to a heuristic.
+/// Returns `(focus, distance)` sized for arcball framing.
 fn fit_params_for_entity(
     root: Entity,
     gt_q: &Query<&GlobalTransform>,
@@ -976,13 +1058,9 @@ fn fit_params_for_entity(
         let center = (min + max) * 0.5;
         let size = (max - min).abs();
         let max_dim = size.x.max(size.y).max(size.z).max(0.05);
-        // 1.6× the biggest dimension: fits the subtree with a small
-        // margin, regardless of aspect ratio.
         let dist = (max_dim * 1.6).clamp(0.2, 200.0);
         (center, dist)
     } else if let Ok(gt) = gt_q.get(root) {
-        // No local extent on anything in the subtree — fall back to
-        // the single-click heuristic.
         (gt.translation(), (current_cam_dist * 0.25).clamp(0.2, 40.0))
     } else {
         (Vec3::ZERO, current_cam_dist)
@@ -995,7 +1073,6 @@ fn fit_params_for_entity(
 fn draw_info_panel(
     mut contexts: EguiContexts,
     open: Res<RibbonOpen>,
-    placement: Res<RibbonPlacement>,
     accent: Res<AccentColor>,
     info: Res<StageInfo>,
     mut reload: ResMut<ReloadRequest>,
@@ -1011,31 +1088,19 @@ fn draw_info_panel(
         return;
     };
     let accent_col = accent.0;
-    let mut keep = true;
-    floating_window_for_item(
-        ctx,
-        RIBBONS,
-        RIBBON_ITEMS,
-        &placement,
-        RIB_INFO,
-        "Stage info",
-        egui::vec2(PANEL_W, PANEL_H + 40.0),
-        &mut keep,
-        accent_col,
-        |pane| {
-            pane.section("info_stage", "Stage", true, |ui| {
+    Pane::new(RIB_INFO, "Stage info", pane_anchor_for(RIB_INFO), accent_col)
+        .resize(PaneResize::SPAN)
+        .show(ctx, |body| {
+            let ui = body.ui();
+            section(ui, "info_stage", "Stage", accent_col, true, |ui| {
                 readout_row(ui, "file", &info.path);
-                readout_row(
-                    ui,
-                    "defaultPrim",
-                    info.default_prim.as_deref().unwrap_or("—"),
-                );
+                readout_row(ui, "defaultPrim", info.default_prim.as_deref().unwrap_or("—"));
                 readout_row(ui, "layers", &info.layer_count.to_string());
                 readout_row(ui, "prims", &prims.iter().count().to_string());
                 readout_row(ui, "meshes", &meshes_q.iter().count().to_string());
                 readout_row(ui, "variants", &info.variant_count.to_string());
             });
-            pane.section("info_lights", "Lights & instances", true, |ui| {
+            section(ui, "info_lights", "Lights & instances", accent_col, true, |ui| {
                 let light_labels = [
                     format!("{} dir", info.lights_directional),
                     format!("{} pt", info.lights_point),
@@ -1052,13 +1117,9 @@ fn draw_info_panel(
                 let refs: Vec<&str> = inst_labels.iter().map(String::as_str).collect();
                 badge_row(ui, "instances", &refs, accent_col);
 
-                readout_row(
-                    ui,
-                    "animated",
-                    &format!("{} prim(s)", info.animated_prim_count),
-                );
+                readout_row(ui, "animated", &format!("{} prim(s)", info.animated_prim_count));
             });
-            pane.section("info_skel_render", "Skel & render", true, |ui| {
+            section(ui, "info_skel_render", "Skel & render", accent_col, true, |ui| {
                 let skel_labels = [
                     format!("{} skel", info.skeleton_count),
                     format!("{} root", info.skel_root_count),
@@ -1087,7 +1148,7 @@ fn draw_info_panel(
                 let refs: Vec<&str> = phys_labels.iter().map(String::as_str).collect();
                 badge_row(ui, "physics", &refs, accent_col);
             });
-            pane.section("info_authoring", "Authoring detail", true, |ui| {
+            section(ui, "info_authoring", "Authoring detail", accent_col, true, |ui| {
                 readout_row(
                     ui,
                     "custom",
@@ -1106,29 +1167,20 @@ fn draw_info_panel(
                     "light-link",
                     &format!("{} light(s) linked", info.light_linked_count),
                 );
-                readout_row(
-                    ui,
-                    "clips",
-                    &format!("{} prim(s) UsdClipsAPI", info.clip_prim_count),
-                );
+                readout_row(ui, "clips", &format!("{} prim(s) UsdClipsAPI", info.clip_prim_count));
                 readout_row(
                     ui,
                     "spatial-audio",
                     &format!("{} source(s)", spatial_audio_q.iter().count()),
                 );
-                readout_row(
-                    ui,
-                    "procedural",
-                    &format!("{} prim(s)", procedural_q.iter().count()),
-                );
+                readout_row(ui, "procedural", &format!("{} prim(s)", procedural_q.iter().count()));
             });
-            pane.section("info_actions", "Actions", true, |ui| {
+            section(ui, "info_actions", "Actions", accent_col, true, |ui| {
                 if wide_button(ui, "⟳  Reload stage (R)", accent_col).clicked() {
                     reload.requested = true;
                 }
             });
-        },
-    );
+        });
 }
 
 // ─── Variants panel ─────────────────────────────────────────────────
@@ -1136,7 +1188,6 @@ fn draw_info_panel(
 fn draw_variants_panel(
     mut contexts: EguiContexts,
     open: Res<RibbonOpen>,
-    placement: Res<RibbonPlacement>,
     accent: Res<AccentColor>,
     stage: Option<Res<crate::StageHandle>>,
     usd_assets: Res<Assets<UsdAsset>>,
@@ -1152,19 +1203,11 @@ fn draw_variants_panel(
         return;
     };
     let accent_col = accent.0;
-    let mut keep = true;
-    floating_window_for_item(
-        ctx,
-        RIBBONS,
-        RIBBON_ITEMS,
-        &placement,
-        RIB_VARIANTS,
-        "Variants",
-        egui::vec2(PANEL_W, PANEL_H),
-        &mut keep,
-        accent_col,
-        |pane| {
-            pane.section("variants_animation", "Animation clips", true, |ui| {
+    Pane::new(RIB_VARIANTS, "Variants", pane_anchor_for(RIB_VARIANTS), accent_col)
+        .resize(PaneResize::SPAN)
+        .show(ctx, |body| {
+            let ui = body.ui();
+            section(ui, "variants_animation", "Animation clips", accent_col, true, |ui| {
                 let asset = stage.as_ref().and_then(|stage| usd_assets.get(&stage.0));
                 let Some(asset) = asset else {
                     sub_caption(ui, "(no stage loaded yet)");
@@ -1233,7 +1276,7 @@ fn draw_variants_panel(
                 }
                 let _ = changed;
             });
-            pane.section("variants_all", "Variant sets", true, |ui| {
+            section(ui, "variants_all", "Variant sets", accent_col, true, |ui| {
                 let asset = stage.as_ref().and_then(|stage| usd_assets.get(&stage.0));
                 match asset {
                     Some(asset)
@@ -1249,9 +1292,7 @@ fn draw_variants_panel(
                             .count();
                         sub_caption(
                             ui,
-                            &format!(
-                                "{variant_prim_count} prims author non-animation variant sets"
-                            ),
+                            &format!("{variant_prim_count} prims author non-animation variant sets"),
                         );
                         ui.add_space(style::space::BLOCK);
 
@@ -1268,7 +1309,7 @@ fn draw_variants_panel(
                                 .collect();
                             entries.sort_by(|a, b| a.0.cmp(b.0));
                             for (prim_path, sets) in entries {
-                                nested_section(
+                                section(
                                     ui,
                                     prim_path.as_str(),
                                     prim_path.as_str(),
@@ -1306,15 +1347,14 @@ fn draw_variants_panel(
                                                     accent_col,
                                                 );
                                                 if r.changed() {
-                                                    let picked = set.options[selected_idx].clone();
+                                                    let picked =
+                                                        set.options[selected_idx].clone();
                                                     if picked != current {
                                                         loader_tuning
                                                             .variants
                                                             .insert(key.clone(), picked.clone());
                                                         // Apply the switch incrementally (live
-                                                        // material swap, no scene rebuild). The
-                                                        // updater itself falls back to a full
-                                                        // reload if the variant changes geometry.
+                                                        // material swap, no scene rebuild).
                                                         pending_variant_switch.queue.push((
                                                             prim_path.clone(),
                                                             set.name.clone(),
@@ -1352,14 +1392,12 @@ fn draw_variants_panel(
                     }
                 }
             });
-        },
-    );
+        });
 }
 
-/// Local dropdown for long USD variant / animation lists. Frost's stock
-/// dropdown paints every option directly in the popup, so the cow's many
-/// `anim` clips can run off-screen. egui's ComboBox has a built-in scroll
-/// area via `.height(...)`, while still returning a normal changed Response.
+/// Local dropdown for long USD variant / animation lists. egui's
+/// ComboBox has a built-in scroll area via `.height(...)`, while still
+/// returning a normal changed Response.
 fn scroll_dropdown_control(
     ui: &mut egui::Ui,
     id_salt: impl Hash,
@@ -1394,10 +1432,6 @@ fn scroll_dropdown_control(
             m.set_focus_lock_filter(
                 response.id,
                 egui::EventFilter {
-                    // Keep focus on the selector while using Up/Down to
-                    // scrub through clips. Without this, egui treats the
-                    // first arrow press as focus navigation and moves focus
-                    // away after a single selection change.
                     vertical_arrows: true,
                     ..Default::default()
                 },
@@ -1429,7 +1463,6 @@ fn scroll_dropdown_control(
 fn draw_cameras_panel(
     mut contexts: EguiContexts,
     open: Res<RibbonOpen>,
-    placement: Res<RibbonPlacement>,
     accent: Res<AccentColor>,
     usd_assets: Res<Assets<UsdAsset>>,
     mut camera_mount: ResMut<CameraMount>,
@@ -1444,19 +1477,11 @@ fn draw_cameras_panel(
         return;
     };
     let accent_col = accent.0;
-    let mut keep = true;
-    floating_window_for_item(
-        ctx,
-        RIBBONS,
-        RIBBON_ITEMS,
-        &placement,
-        RIB_CAMERAS,
-        "Cameras",
-        egui::vec2(PANEL_W, PANEL_H),
-        &mut keep,
-        accent_col,
-        |pane| {
-            pane.section("cameras_bookmarks", "Bookmarks", true, |ui| {
+    Pane::new(RIB_CAMERAS, "Cameras", pane_anchor_for(RIB_CAMERAS), accent_col)
+        .resize(PaneResize::SPAN)
+        .show(ctx, |body| {
+            let ui = body.ui();
+            section(ui, "cameras_bookmarks", "Bookmarks", accent_col, true, |ui| {
                 if wide_button(ui, "💾  Save current view", accent_col).clicked() {
                     if let Ok(cam) = cameras.single() {
                         let seq = bookmarks.next_seq + 1;
@@ -1514,7 +1539,7 @@ fn draw_cameras_panel(
                 }
             });
 
-            pane.section("cameras_all", "Cameras", true, |ui| {
+            section(ui, "cameras_all", "Cameras", accent_col, true, |ui| {
                 let asset = usd_assets.iter().next().map(|(_, a)| a);
                 let Some(asset) = asset else {
                     sub_caption(ui, "(no stage loaded yet)");
@@ -1570,30 +1595,17 @@ fn draw_cameras_panel(
                     }
                 });
             });
-        },
-    );
+        });
 }
 
 // ─── Materials panel ────────────────────────────────────────────────
-//
-// Lets the user override per-material `StandardMaterial` properties
-// at runtime. Useful when an asset author shipped placeholder colours
-// instead of textures (Scout V2 with yellow wheels, Jackal with
-// `material_yellow` strips, …) — mutating the underlying asset
-// propagates the new colour to every mesh that bound this material,
-// no per-mesh override needed.
 
 fn draw_materials_panel(
     mut contexts: EguiContexts,
     open: Res<RibbonOpen>,
-    placement: Res<RibbonPlacement>,
     accent: Res<AccentColor>,
     materials: Res<Assets<StandardMaterial>>,
     asset_server: Res<AssetServer>,
-    // Only entities tagged with `UsdPrimRef` came from the loaded
-    // USD asset — restrict the panel to those so it doesn't list
-    // glacial's grid materials, the gizmo lines, the ground floor,
-    // or any other internal viewer geometry.
     usd_mesh_mats: Query<&MeshMaterial3d<StandardMaterial>, With<UsdPrimRef>>,
 ) {
     if !is_panel_open(&open, RIB_MATERIALS) {
@@ -1603,7 +1615,6 @@ fn draw_materials_panel(
         return;
     };
     let accent_col = accent.0;
-    let mut keep = true;
 
     let mut bound: std::collections::HashSet<AssetId<StandardMaterial>> =
         std::collections::HashSet::new();
@@ -1625,20 +1636,15 @@ fn draw_materials_panel(
         .collect();
     entries.sort_by(|a, b| a.1.cmp(&b.1));
 
-    floating_window_for_item(
-        ctx,
-        RIBBONS,
-        RIBBON_ITEMS,
-        &placement,
-        RIB_MATERIALS,
-        "Materials",
-        egui::vec2(PANEL_W, PANEL_H),
-        &mut keep,
-        accent_col,
-        |pane| {
-            pane.section(
+    Pane::new(RIB_MATERIALS, "Materials", pane_anchor_for(RIB_MATERIALS), accent_col)
+        .resize(PaneResize::SPAN)
+        .show(ctx, |body| {
+            let ui = body.ui();
+            section(
+                ui,
                 "materials_overview",
                 &format!("{} material(s)", entries.len()),
+                accent_col,
                 true,
                 |ui| {
                     sub_caption(
@@ -1656,29 +1662,23 @@ fn draw_materials_panel(
                     .take(48)
                     .collect::<String>();
                 let section_id = format!("mat_{:?}", id);
-                pane.section(
-                    Box::leak(section_id.into_boxed_str()),
-                    Box::leak(short.into_boxed_str()),
-                    false,
-                    |ui| {
-                        let Some(mat) = materials.get(*id) else {
-                            return;
-                        };
-                        ui.label(egui::RichText::new(label).small().monospace());
-                        ui.add_space(style::space::BLOCK);
-                        let texture_state = if mat.base_color_texture.is_some() {
-                            "textured"
-                        } else {
-                            "constant color"
-                        };
-                        readout_row(ui, "Albedo", texture_state);
-                        readout_row(ui, "Roughness", "USD/default");
-                        readout_row(ui, "Metallic", "USD/default");
-                    },
-                );
+                section(ui, &section_id, &short, accent_col, false, |ui| {
+                    let Some(mat) = materials.get(*id) else {
+                        return;
+                    };
+                    ui.label(egui::RichText::new(label).small().monospace());
+                    ui.add_space(style::space::BLOCK);
+                    let texture_state = if mat.base_color_texture.is_some() {
+                        "textured"
+                    } else {
+                        "constant color"
+                    };
+                    readout_row(ui, "Albedo", texture_state);
+                    readout_row(ui, "Roughness", "USD/default");
+                    readout_row(ui, "Metallic", "USD/default");
+                });
             }
-        },
-    );
+        });
 }
 
 // ─── Overlays panel ─────────────────────────────────────────────────
@@ -1686,7 +1686,6 @@ fn draw_materials_panel(
 fn draw_overlays_panel(
     mut contexts: EguiContexts,
     open: Res<RibbonOpen>,
-    placement: Res<RibbonPlacement>,
     accent: Res<AccentColor>,
     mut toggles: ResMut<DisplayToggles>,
     mut loader_tuning: ResMut<LoaderTuning>,
@@ -1698,72 +1697,26 @@ fn draw_overlays_panel(
         return;
     };
     let accent_col = accent.0;
-    let mut keep = true;
-    floating_window_for_item(
-        ctx,
-        RIBBONS,
-        RIBBON_ITEMS,
-        &placement,
-        RIB_OVERLAYS,
-        "Overlays",
-        egui::vec2(PANEL_W, PANEL_H),
-        &mut keep,
-        accent_col,
-        |pane| {
-            pane.section("overlay_toggles", "World overlays", true, |ui| {
-                toggle(
-                    ui,
-                    "Ground grid (G)",
-                    &mut toggles.show_world_grid,
-                    accent_col,
-                );
-                toggle(
-                    ui,
-                    "World axes (X)",
-                    &mut toggles.show_world_axes,
-                    accent_col,
-                );
-                toggle(
-                    ui,
-                    "Prim markers (P)",
-                    &mut toggles.show_prim_markers,
-                    accent_col,
-                );
+    Pane::new(RIB_OVERLAYS, "Overlays", pane_anchor_for(RIB_OVERLAYS), accent_col)
+        .resize(PaneResize::SPAN)
+        .show(ctx, |body| {
+            let ui = body.ui();
+            section(ui, "overlay_toggles", "World overlays", accent_col, true, |ui| {
+                toggle(ui, "Ground grid (G)", &mut toggles.show_world_grid, accent_col);
+                toggle(ui, "World axes (X)", &mut toggles.show_world_axes, accent_col);
+                toggle(ui, "Prim markers (P)", &mut toggles.show_prim_markers, accent_col);
                 let mut v = toggles.prim_marker_bias as f64;
-                if pretty_slider(
-                    ui,
-                    "Prim marker bias",
-                    &mut v,
-                    0.0..=5.0,
-                    2,
-                    "×",
-                    accent_col,
-                )
-                .changed()
+                if pretty_slider(ui, "Prim marker bias", &mut v, 0.0..=5.0, 2, "×", accent_col)
+                    .changed()
                 {
                     toggles.prim_marker_bias = v as f32;
                 }
-                toggle(
-                    ui,
-                    "Skeleton bones (B)",
-                    &mut toggles.show_skeleton,
-                    accent_col,
-                );
-                toggle(
-                    ui,
-                    "Physics gizmos (Y)",
-                    &mut toggles.show_physics,
-                    accent_col,
-                );
-                toggle(
-                    ui,
-                    "Collider wireframes (C)",
-                    &mut toggles.show_colliders,
-                    accent_col,
-                );
+                toggle(ui, "Skeleton bones (B)", &mut toggles.show_skeleton, accent_col);
+                toggle(ui, "Physics gizmos (Y)", &mut toggles.show_physics, accent_col);
+                toggle(ui, "Collider wireframes (C)", &mut toggles.show_colliders, accent_col);
             });
 
-            pane.section("overlay_render", "Render", true, |ui| {
+            section(ui, "overlay_render", "Render", accent_col, true, |ui| {
                 toggle(ui, "Wireframe", &mut toggles.wireframe, accent_col);
                 let mut s = toggles.light_intensity_scale as f64;
                 if pretty_slider(ui, "Light intensity", &mut s, 0.0..=5.0, 2, "×", accent_col)
@@ -1774,7 +1727,7 @@ fn draw_overlays_panel(
                 sub_caption(ui, "Scales every authored light from its original value.");
             });
 
-            pane.section("overlay_curves", "Curves (tubes)", true, |ui| {
+            section(ui, "overlay_curves", "Curves (tubes)", accent_col, true, |ui| {
                 sub_caption(ui, "Default radius used when widths aren't authored");
                 let mut r = loader_tuning.curves.default_radius as f64;
                 if pretty_slider(ui, "Radius", &mut r, 0.001..=0.2, 3, " m", accent_col).changed() {
@@ -1794,8 +1747,7 @@ fn draw_overlays_panel(
                 }
                 sub_caption(ui, "Sliders apply live — no reload needed.");
             });
-        },
-    );
+        });
 }
 
 // ─── Timeline panel ─────────────────────────────────────────────────
@@ -1803,7 +1755,6 @@ fn draw_overlays_panel(
 fn draw_timeline_panel(
     mut contexts: EguiContexts,
     open: Res<RibbonOpen>,
-    placement: Res<RibbonPlacement>,
     accent: Res<AccentColor>,
     mut clock: ResMut<UsdStageTime>,
     usd_assets: Res<Assets<UsdAsset>>,
@@ -1815,19 +1766,11 @@ fn draw_timeline_panel(
         return;
     };
     let accent_col = accent.0;
-    let mut keep = true;
-    floating_window_for_item(
-        ctx,
-        RIBBONS,
-        RIBBON_ITEMS,
-        &placement,
-        RIB_TIMELINE,
-        "Timeline",
-        egui::vec2(PANEL_W, 320.0),
-        &mut keep,
-        accent_col,
-        |pane| {
-            pane.section("timeline_playback", "Playback", true, |ui| {
+    Pane::new(RIB_TIMELINE, "Timeline", pane_anchor_for(RIB_TIMELINE), accent_col)
+        .resize(PaneResize::SPAN)
+        .show(ctx, |body| {
+            let ui = body.ui();
+            section(ui, "timeline_playback", "Playback", accent_col, true, |ui| {
                 let asset = usd_assets.iter().next().map(|(_, a)| a);
                 let animated_count = asset.map(|a| a.animated_prims.len()).unwrap_or(0);
                 sub_caption(
@@ -1840,11 +1783,7 @@ fn draw_timeline_panel(
                 );
                 ui.add_space(style::space::BLOCK);
 
-                let play_label = if clock.playing {
-                    "⏸  Pause"
-                } else {
-                    "▶  Play"
-                };
+                let play_label = if clock.playing { "⏸  Pause" } else { "▶  Play" };
                 if wide_button(ui, play_label, accent_col).clicked() {
                     clock.playing = !clock.playing;
                 }
@@ -1854,15 +1793,7 @@ fn draw_timeline_panel(
 
                 ui.add_space(style::space::BLOCK);
                 let dur = clock.duration_seconds().max(1e-3);
-                let _ = pretty_slider(
-                    ui,
-                    "Seconds",
-                    &mut clock.seconds,
-                    0.0..=dur,
-                    3,
-                    " s",
-                    accent_col,
-                );
+                let _ = pretty_slider(ui, "Seconds", &mut clock.seconds, 0.0..=dur, 3, " s", accent_col);
 
                 readout_row(ui, "timeCode", &format!("{:.3}", clock.current_time_code()));
                 readout_row(
@@ -1872,18 +1803,12 @@ fn draw_timeline_panel(
                 );
                 readout_row(ui, "fps", &format!("{:.2}", clock.time_codes_per_second));
             });
-        },
-    );
+        });
 }
 
 // ─── Keys panel ─────────────────────────────────────────────────────
 
-fn draw_keys_panel(
-    mut contexts: EguiContexts,
-    open: Res<RibbonOpen>,
-    placement: Res<RibbonPlacement>,
-    accent: Res<AccentColor>,
-) {
+fn draw_keys_panel(mut contexts: EguiContexts, open: Res<RibbonOpen>, accent: Res<AccentColor>) {
     if !is_panel_open(&open, RIB_KEYS) {
         return;
     }
@@ -1891,42 +1816,31 @@ fn draw_keys_panel(
         return;
     };
     let accent_col = accent.0;
-    let mut keep = true;
-    floating_window_for_item(
-        ctx,
-        RIBBONS,
-        RIBBON_ITEMS,
-        &placement,
-        RIB_KEYS,
-        "Controls",
-        egui::vec2(PANEL_W, PANEL_H),
-        &mut keep,
-        accent_col,
-        |pane| {
-            pane.section("keys_camera", "Camera", true, |ui| {
+    Pane::new(RIB_KEYS, "Controls", pane_anchor_for(RIB_KEYS), accent_col)
+        .resize(PaneResize::SPAN)
+        .show(ctx, |body| {
+            let ui = body.ui();
+            section(ui, "keys_camera", "Camera", accent_col, true, |ui| {
                 keybinding_row(ui, "L+R drag", "Orbit");
                 keybinding_row(ui, "Middle", "Pan");
                 keybinding_row(ui, "Scroll", "Zoom");
             });
-            pane.section("keys_panels", "Panels", true, |ui| {
+            section(ui, "keys_panels", "Panels", accent_col, true, |ui| {
                 keybinding_row(ui, "T", "Toggle prim tree");
                 keybinding_row(ui, "I", "Toggle stage info");
                 keybinding_row(ui, "O", "Toggle overlays");
                 keybinding_row(ui, "?", "Toggle this panel");
             });
-            pane.section("keys_overlays", "Overlays", true, |ui| {
+            section(ui, "keys_overlays", "Overlays", accent_col, true, |ui| {
                 keybinding_row(ui, "G", "Ground grid");
                 keybinding_row(ui, "X", "World axes");
                 keybinding_row(ui, "P", "Prim markers");
                 keybinding_row(ui, "B", "Skeleton bones");
             });
-            pane.section("keys_stage", "Stage", true, |ui| {
+            section(ui, "keys_stage", "Stage", accent_col, true, |ui| {
                 keybinding_row(ui, "R", "Reload stage from disk");
             });
-        },
-    );
-    // Suppress unused warning when accent_col isn't read inside bodies.
-    let _ = accent_col;
+        });
 }
 
 // ─── Log panel ──────────────────────────────────────────────────────
@@ -1934,7 +1848,6 @@ fn draw_keys_panel(
 fn draw_log_panel(
     mut contexts: EguiContexts,
     open: Res<RibbonOpen>,
-    placement: Res<RibbonPlacement>,
     accent: Res<AccentColor>,
     log: Res<crate::log_panel::LoaderLog>,
 ) {
@@ -1945,19 +1858,11 @@ fn draw_log_panel(
         return;
     };
     let accent_col = accent.0;
-    let mut keep = true;
-    floating_window_for_item(
-        ctx,
-        RIBBONS,
-        RIBBON_ITEMS,
-        &placement,
-        RIB_LOG,
-        "Log",
-        egui::vec2(PANEL_W + 80.0, PANEL_H),
-        &mut keep,
-        accent_col,
-        |pane| {
-            pane.section("log_lines", "Loader log", true, |ui| {
+    Pane::new(RIB_LOG, "Log", pane_anchor_for(RIB_LOG), accent_col)
+        .resize(PaneResize::SPAN)
+        .show(ctx, |body| {
+            let ui = body.ui();
+            section(ui, "log_lines", "Loader log", accent_col, true, |ui| {
                 let count = log.buffer.lock().map(|b| b.len()).unwrap_or(0);
                 sub_caption(ui, &format!("{count} entries · capped at 500"));
                 ui.horizontal(|ui| {
@@ -2009,8 +1914,7 @@ fn draw_log_panel(
                         }
                     });
             });
-        },
-    );
+        });
 }
 
 fn level_to_color(level: bevy::log::Level) -> egui::Color32 {
@@ -2023,8 +1927,6 @@ fn level_to_color(level: bevy::log::Level) -> egui::Color32 {
 }
 
 fn short_target(target: &str) -> String {
-    // `usd_bevy::asset` → `asset`. Drops the crate prefix so the
-    // log row stays readable at panel width.
     target.rsplit("::").next().unwrap_or(target).to_string()
 }
 
