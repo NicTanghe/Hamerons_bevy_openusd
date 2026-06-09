@@ -102,7 +102,7 @@ const RIBBON_ITEMS: &[RibbonButtonSpec] = &[
         cluster: RibbonCluster::Start,
         slot: 0,
         draggable: false,
-        glyph: RibbonGlyph::Text("F"),
+        glyph: RibbonGlyph::Icon("cursor"),
         tooltip: "File / selection",
         child_ribbon: None,
         role: None,
@@ -113,7 +113,7 @@ const RIBBON_ITEMS: &[RibbonButtonSpec] = &[
         cluster: RibbonCluster::Start,
         slot: 1,
         draggable: false,
-        glyph: RibbonGlyph::Text("T"),
+        glyph: RibbonGlyph::Icon("folder"),
         tooltip: "Prim tree (T)",
         child_ribbon: None,
         role: None,
@@ -124,7 +124,7 @@ const RIBBON_ITEMS: &[RibbonButtonSpec] = &[
         cluster: RibbonCluster::Start,
         slot: 2,
         draggable: false,
-        glyph: RibbonGlyph::Text("i"),
+        glyph: RibbonGlyph::Icon("document"),
         tooltip: "Stage info (I)",
         child_ribbon: None,
         role: None,
@@ -135,7 +135,7 @@ const RIBBON_ITEMS: &[RibbonButtonSpec] = &[
         cluster: RibbonCluster::Start,
         slot: 3,
         draggable: false,
-        glyph: RibbonGlyph::Text("V"),
+        glyph: RibbonGlyph::Icon("options"),
         tooltip: "Variants",
         child_ribbon: None,
         role: None,
@@ -146,7 +146,7 @@ const RIBBON_ITEMS: &[RibbonButtonSpec] = &[
         cluster: RibbonCluster::Start,
         slot: 4,
         draggable: false,
-        glyph: RibbonGlyph::Text("C"),
+        glyph: RibbonGlyph::Icon("cube"),
         tooltip: "Cameras",
         child_ribbon: None,
         role: None,
@@ -157,7 +157,7 @@ const RIBBON_ITEMS: &[RibbonButtonSpec] = &[
         cluster: RibbonCluster::Start,
         slot: 5,
         draggable: false,
-        glyph: RibbonGlyph::Text("M"),
+        glyph: RibbonGlyph::Icon("color"),
         tooltip: "Materials",
         child_ribbon: None,
         role: None,
@@ -168,7 +168,7 @@ const RIBBON_ITEMS: &[RibbonButtonSpec] = &[
         cluster: RibbonCluster::Middle,
         slot: 0,
         draggable: false,
-        glyph: RibbonGlyph::Text("▶"),
+        glyph: RibbonGlyph::Icon("play"),
         tooltip: "Play / pause physics",
         child_ribbon: None,
         role: Some(RibbonRole::Icon),
@@ -179,7 +179,7 @@ const RIBBON_ITEMS: &[RibbonButtonSpec] = &[
         cluster: RibbonCluster::End,
         slot: 0,
         draggable: false,
-        glyph: RibbonGlyph::Text("O"),
+        glyph: RibbonGlyph::Icon("square-multiple"),
         tooltip: "Overlays (O)",
         child_ribbon: None,
         role: None,
@@ -190,7 +190,7 @@ const RIBBON_ITEMS: &[RibbonButtonSpec] = &[
         cluster: RibbonCluster::End,
         slot: 1,
         draggable: false,
-        glyph: RibbonGlyph::Text("⏱"),
+        glyph: RibbonGlyph::Icon("clock"),
         tooltip: "Timeline",
         child_ribbon: None,
         role: None,
@@ -201,7 +201,7 @@ const RIBBON_ITEMS: &[RibbonButtonSpec] = &[
         cluster: RibbonCluster::End,
         slot: 2,
         draggable: false,
-        glyph: RibbonGlyph::Text("?"),
+        glyph: RibbonGlyph::Icon("keyboard"),
         tooltip: "Controls (?)",
         child_ribbon: None,
         role: None,
@@ -212,7 +212,7 @@ const RIBBON_ITEMS: &[RibbonButtonSpec] = &[
         cluster: RibbonCluster::End,
         slot: 3,
         draggable: false,
-        glyph: RibbonGlyph::Text("📜"),
+        glyph: RibbonGlyph::Icon("list"),
         tooltip: "Log",
         child_ribbon: None,
         role: None,
@@ -413,9 +413,12 @@ impl Plugin for ViewerUiPlugin {
             .add_systems(
                 EguiPrimaryContextPass,
                 (
-                    // Panes paint first; the ribbon assembly registers
-                    // last so its `Area`s layer above the panes. Click
-                    // handling updates `RibbonOpen` for the next frame.
+                    // Publish pane-button ids first (Pane::show needs
+                    // them); panes paint next; the ribbon assembly
+                    // registers last so its `Area`s layer above the
+                    // panes. Click handling updates `RibbonOpen` for the
+                    // next frame.
+                    publish_pane_ids,
                     draw_selection_panel,
                     draw_tree_panel,
                     draw_info_panel,
@@ -464,6 +467,21 @@ fn draw_ribbons(
             physics.0 = !physics.0;
         }
     }
+}
+
+/// mara's `Pane::show` requires the set of ribbon pane-button ids to be
+/// published each frame (it uses them to lay out the rails). Runs before
+/// any pane so the geometry is ready.
+fn publish_pane_ids(mut contexts: EguiContexts) {
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+    let ids: Vec<egui::Id> = RIBBON_ITEMS
+        .iter()
+        .filter(|i| i.role.is_none())
+        .map(|i| egui::Id::new(i.id))
+        .collect();
+    mara_core::pane::publish_ribbon_pane_ids(ctx, ids);
 }
 
 fn is_panel_open(open: &RibbonOpen, item: &'static str) -> bool {
