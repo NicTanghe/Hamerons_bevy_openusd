@@ -4,7 +4,7 @@
 
 use bevy::ecs::component::Component;
 use bevy::ecs::reflect::ReflectComponent;
-use bevy::reflect::{std_traits::ReflectDefault, Reflect};
+use bevy::reflect::{Reflect, std_traits::ReflectDefault};
 
 /// The composed absolute prim path an entity was projected from
 /// (e.g. `"/World/ChildA"`).

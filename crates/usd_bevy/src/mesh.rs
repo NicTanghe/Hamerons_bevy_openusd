@@ -9,10 +9,10 @@
 //! Orientation (`"leftHanded"` flips winding) and missing-normal fallback
 //! (`compute_smooth_normals`) are handled here.
 
+use crate::read::geom::{Axis, Interpolation, MeshPrimvar, Orientation, ReadCylinder, ReadMesh};
 use bevy::asset::RenderAssetUsages;
 use bevy::math::Vec3;
 use bevy::mesh::{Indices, Mesh, Meshable, PrimitiveTopology, VertexAttributeValues};
-use crate::read::geom::{Axis, Interpolation, MeshPrimvar, Orientation, ReadCylinder, ReadMesh};
 
 /// Convert a `crate::read::geom::ReadMesh` into a Bevy mesh.
 ///

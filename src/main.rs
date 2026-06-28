@@ -7,23 +7,22 @@
 use bevy::camera::RenderTarget;
 use bevy::prelude::*;
 
-use mara::host::MaraHostCtx;
+use mara::host::{MaraHostCtx, RibbonRail};
 use mara::ui::mara_core;
 use mara::ui::modules::bevy as mara_bevy;
 use mara::window::{CreationContext, WindowApp};
-use mara_core::pane::{Pane, PaneAnchor, PaneBody, PaneResize, RailZone};
+use mara_core::pane::{PaneAnchor, PaneBody, RailZone};
 use mara_core::pod::Pod;
-use mara_core::ribbon::{
-    ResolvedSlotRibbon, RibbonAction, RibbonCluster, RibbonDrag, RibbonEdge, RibbonMode,
-    RibbonOpen, RibbonPlacement, RibbonRole, RibbonSlotClick, RibbonSlotItem,
-};
+use mara_core::ribbon::RibbonAction;
 use mara_core::style::active_accent;
 use mara_core::vocab::{Color32 as MaraColor32, Id as MaraId};
-use mara_core::{RibbonAvoidance, RibbonScope, ViewId, WorkspaceStack};
+use mara_core::{RibbonAvoidance, WorkspaceStack};
+
+use std::cell::RefCell;
 
 use openusd::usd::Stage;
-use usd_bevy::live::{LiveStage, LiveStagePlugin};
 use usd_bevy::UsdPlugin;
+use usd_bevy::live::{LiveStage, LiveStagePlugin};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     mara::window::run::<UsdApp>()
@@ -31,128 +30,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 // ─── Ribbon / pane ids ──────────────────────────────────────────────
 
-const RIBBON_TOP: &str = "usd_ribbon_top";
 const RIBBON_LEFT: &str = "usd_ribbon_left";
 const PANE_OUTLINER: &str = "usd_pane_outliner";
 const PANE_PROPERTIES: &str = "usd_pane_properties";
 const ACTION_SAVE: &str = "usd_action_save";
 
-#[derive(Clone, Copy)]
-struct RibbonSpec {
-    id: &'static str,
-    edge: RibbonEdge,
-    role: RibbonRole,
-    mode: RibbonMode,
-    accepts: &'static [&'static str],
-}
-
-#[derive(Clone, Copy)]
-struct ButtonSpec {
-    id: &'static str,
-    ribbon: &'static str,
-    cluster: RibbonCluster,
-    icon: &'static str,
-    tooltip: &'static str,
-    role: Option<RibbonRole>,
-}
-
-const RIBBONS: &[RibbonSpec] = &[
-    RibbonSpec {
-        id: RIBBON_TOP,
-        edge: RibbonEdge::Top,
-        role: RibbonRole::Panel,
-        mode: RibbonMode::ThreeSided,
-        accepts: &[],
-    },
-    RibbonSpec {
-        id: RIBBON_LEFT,
-        edge: RibbonEdge::Left,
-        role: RibbonRole::Panel,
-        mode: RibbonMode::ThreeSided,
-        accepts: &[],
-    },
-];
-
-const BUTTONS: &[ButtonSpec] = &[
-    ButtonSpec {
-        id: PANE_OUTLINER,
-        ribbon: RIBBON_LEFT,
-        cluster: RibbonCluster::Start,
-        icon: "list",
-        tooltip: "Outliner",
-        role: None,
-    },
-    ButtonSpec {
-        id: PANE_PROPERTIES,
-        ribbon: RIBBON_LEFT,
-        cluster: RibbonCluster::Start,
-        icon: "options",
-        tooltip: "Properties",
-        role: None,
-    },
-    ButtonSpec {
-        id: ACTION_SAVE,
-        ribbon: RIBBON_LEFT,
-        cluster: RibbonCluster::End,
-        icon: "document",
-        tooltip: "Save stage",
-        role: Some(RibbonRole::Icon),
-    },
-];
-
-// (ribbon, pane id, anchor, title)
-const PANES: &[(&str, &str, PaneAnchor, &str)] = &[
-    (RIBBON_LEFT, PANE_OUTLINER, PaneAnchor::LeftRail(RailZone::Start), "Outliner"),
-    (RIBBON_LEFT, PANE_PROPERTIES, PaneAnchor::LeftRail(RailZone::Middle), "Properties"),
-];
-
 fn ribbon_action(id: &'static str) -> RibbonAction {
     RibbonAction::Command(MaraId::new(id))
-}
-
-fn ribbon_scope(id: &'static str) -> RibbonScope {
-    if id == RIBBON_TOP {
-        RibbonScope::Permanent
-    } else {
-        RibbonScope::View(ViewId::new("usdview.ribbons"))
-    }
-}
-
-fn draw_ribbons(
-    host: &MaraHostCtx<'_>,
-    accent: MaraColor32,
-    open: &mut RibbonOpen,
-    placement: &mut RibbonPlacement,
-    drag: &mut RibbonDrag,
-) -> Vec<RibbonSlotClick> {
-    let mut resolved = Vec::new();
-    for ribbon in RIBBONS {
-        for cluster in [RibbonCluster::Start, RibbonCluster::Middle, RibbonCluster::End] {
-            let items: Vec<RibbonSlotItem> = BUTTONS
-                .iter()
-                .filter(|b| b.ribbon == ribbon.id && b.cluster == cluster)
-                .map(|b| {
-                    RibbonSlotItem::featureful(b.id, b.icon, b.id, b.tooltip, ribbon_action(b.id))
-                        .with_role(b.role.unwrap_or(ribbon.role))
-                })
-                .collect();
-            if items.is_empty() {
-                continue;
-            }
-            resolved.push(ResolvedSlotRibbon {
-                id: MaraId::new((ribbon.id, cluster)),
-                chrome_id: Some(ribbon.id),
-                scope: ribbon_scope(ribbon.id),
-                edge: ribbon.edge,
-                role: ribbon.role,
-                mode: ribbon.mode,
-                cluster,
-                accepts: ribbon.accepts,
-                items,
-            });
-        }
-    }
-    host.draw_slot_ribbons_featureful(accent, &resolved, open, placement, drag)
 }
 
 // ─── App ────────────────────────────────────────────────────────────
@@ -167,9 +51,6 @@ struct PrimRow {
 struct UsdApp {
     bevy_view: mara_bevy::MaraBevyViewport,
     workspace: WorkspaceStack,
-    open: RibbonOpen,
-    placement: RibbonPlacement,
-    drag: RibbonDrag,
     /// A read-side stage for the outliner/properties panes (the embedded
     /// viewport renders its own live copy).
     stage: Option<Stage>,
@@ -188,15 +69,10 @@ impl WindowApp for UsdApp {
 
         let stage = path.as_deref().and_then(|p| Stage::open(p).ok());
         let prims = stage.as_ref().map(collect_prims).unwrap_or_default();
-        let mut open = RibbonOpen::default();
-        open.set(RIBBON_LEFT, PANE_OUTLINER);
 
         Self {
             bevy_view,
             workspace: WorkspaceStack::new("usd-workspace"),
-            open,
-            placement: RibbonPlacement::default(),
-            drag: RibbonDrag::default(),
             stage,
             prims,
             selected: None,
@@ -207,9 +83,6 @@ impl WindowApp for UsdApp {
         let Self {
             bevy_view,
             workspace,
-            open,
-            placement,
-            drag,
             stage,
             prims,
             selected,
@@ -222,24 +95,38 @@ impl WindowApp for UsdApp {
             bevy_view.show(&mut vctx, host.render_state(), accent);
         }
 
-        // Panes reachable from the ribbon.
-        host.publish_ribbon_pane_ids([MaraId::new(PANE_OUTLINER), MaraId::new(PANE_PROPERTIES)]);
-        for &(ribbon, pane, anchor, title) in PANES {
-            if !open.is_open(ribbon, pane) {
-                continue;
-            }
-            host.show_pane(
-                Pane::new(pane, title, anchor, accent).resize(PaneResize::SPAN),
-                |body| match pane {
-                    PANE_OUTLINER => outliner_pane(body, prims, &mut *selected, accent),
-                    PANE_PROPERTIES => properties_pane(body, stage, selected),
-                    _ => {}
+        // Panes + ribbon rail. Mara owns the pane/ribbon wiring,
+        // open-state, pane-id publication, and paint ordering.
+        let selected = RefCell::new(selected);
+        let rail = RibbonRail::view_left(RIBBON_LEFT, "usdview.ribbons")
+            .default_open(PANE_OUTLINER)
+            .pane(
+                PANE_OUTLINER,
+                "list",
+                "Outliner",
+                PaneAnchor::LeftRail(RailZone::Start),
+                |body| {
+                    let mut selected = selected.borrow_mut();
+                    outliner_pane(body, prims, &mut **selected, accent);
                 },
+            )
+            .pane(
+                PANE_PROPERTIES,
+                "options",
+                "Properties",
+                PaneAnchor::LeftRail(RailZone::Middle),
+                |body| {
+                    let selected = selected.borrow();
+                    properties_pane(body, stage, &**selected);
+                },
+            )
+            .action(
+                ACTION_SAVE,
+                "document",
+                "Save stage",
+                ribbon_action(ACTION_SAVE),
             );
-        }
-
-        // Ribbons (clicking a pane button toggles `open`; actions come back).
-        for click in draw_ribbons(host, accent, open, placement, drag) {
+        for click in host.show_ribbon_rail(rail, accent) {
             if click.action == ribbon_action(ACTION_SAVE) {
                 if let Some(stage) = stage.as_ref() {
                     match usd_bevy::authoring::save_stage_as(stage, "usdview_out.usda") {
@@ -254,16 +141,19 @@ impl WindowApp for UsdApp {
 
 fn collect_prims(stage: &Stage) -> Vec<PrimRow> {
     let mut out = Vec::new();
-    let _ = stage.traverse(openusd::usd::PrimPredicate::default(), |path: &openusd::sdf::Path| {
-        let s = path.as_str();
-        let name = s.rsplit('/').next().unwrap_or(s).to_string();
-        let depth = (s.matches('/').count() as u32).saturating_sub(1);
-        out.push(PrimRow {
-            path: s.to_string(),
-            name,
-            depth,
-        });
-    });
+    let _ = stage.traverse(
+        openusd::usd::PrimPredicate::default(),
+        |path: &openusd::sdf::Path| {
+            let s = path.as_str();
+            let name = s.rsplit('/').next().unwrap_or(s).to_string();
+            let depth = (s.matches('/').count() as u32).saturating_sub(1);
+            out.push(PrimRow {
+                path: s.to_string(),
+                name,
+                depth,
+            });
+        },
+    );
     out
 }
 

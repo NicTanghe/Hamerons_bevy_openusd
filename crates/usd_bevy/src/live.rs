@@ -57,7 +57,11 @@ impl LiveStage {
         let q = queue.clone();
         let sink = stage.add_sink(move |_stage: &Stage, change: &CommittedChange<'_>| {
             q.borrow_mut().push(StageChange {
-                resynced: change.resynced.iter().map(|p| p.as_str().to_string()).collect(),
+                resynced: change
+                    .resynced
+                    .iter()
+                    .map(|p| p.as_str().to_string())
+                    .collect(),
                 changed_info: change
                     .changed_info_only
                     .iter()
@@ -160,7 +164,7 @@ impl PrimEntities {
 // routing (RETHINK §12) layer on top of this same shape.
 
 use crate::prim_ref::UsdPrimRef;
-use crate::read::geom::{read_visibility, VisibilityState};
+use crate::read::geom::{VisibilityState, read_visibility};
 use crate::read::xform::read_transform;
 
 fn to_bevy_transform(t: crate::read::xform::Transform3) -> Transform {
@@ -238,20 +242,23 @@ fn prim_of(path: &str) -> &str {
 /// empty world — call once on load.
 pub fn project_stage(world: &mut World, live: &LiveStage, map: &mut PrimEntities) {
     let stage = &live.stage;
-    let _ = stage.traverse(openusd::usd::PrimPredicate::default(), |path: &openusd::sdf::Path| {
-        let entity = world
-            .spawn((
-                UsdPrimRef {
-                    path: path.as_str().to_string(),
-                    ..Default::default()
-                },
-                transform_at(stage, path.as_str()),
-                visibility_at(stage, path.as_str()),
-            ))
-            .id();
-        map.insert(path.as_str().to_string(), entity);
-        attach_mesh(world, stage, entity, path.as_str());
-    });
+    let _ = stage.traverse(
+        openusd::usd::PrimPredicate::default(),
+        |path: &openusd::sdf::Path| {
+            let entity = world
+                .spawn((
+                    UsdPrimRef {
+                        path: path.as_str().to_string(),
+                        ..Default::default()
+                    },
+                    transform_at(stage, path.as_str()),
+                    visibility_at(stage, path.as_str()),
+                ))
+                .id();
+            map.insert(path.as_str().to_string(), entity);
+            attach_mesh(world, stage, entity, path.as_str());
+        },
+    );
     // Projecting authored the initial read; clear so the first sync starts clean.
     let _ = live.drain_changes();
 }
@@ -288,9 +295,12 @@ pub fn apply_changes(world: &mut World, live: &LiveStage, map: &mut PrimEntities
 fn reconcile(world: &mut World, live: &LiveStage, map: &mut PrimEntities) {
     let stage = &live.stage;
     let mut current: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let _ = stage.traverse(openusd::usd::PrimPredicate::default(), |p: &openusd::sdf::Path| {
-        current.insert(p.as_str().to_string());
-    });
+    let _ = stage.traverse(
+        openusd::usd::PrimPredicate::default(),
+        |p: &openusd::sdf::Path| {
+            current.insert(p.as_str().to_string());
+        },
+    );
 
     // Despawn entities for prims no longer present.
     let stale: Vec<(String, Entity)> = map
@@ -395,9 +405,12 @@ pub fn author_transform(
 ) -> anyhow::Result<()> {
     use openusd::sdf::Value;
     let prim = openusd::sdf::path(prim_path)?;
-    let cols =
-        Mat4::from_scale_rotation_translation(transform.scale, transform.rotation, transform.translation)
-            .to_cols_array();
+    let cols = Mat4::from_scale_rotation_translation(
+        transform.scale,
+        transform.rotation,
+        transform.translation,
+    )
+    .to_cols_array();
     let m: [f64; 16] = std::array::from_fn(|i| cols[i] as f64);
 
     let xop = prim.append_property("xformOp:transform")?;
@@ -525,13 +538,19 @@ mod tests {
             .expect("set value");
 
         let changes = live.drain_changes();
-        assert!(!changes.is_empty(), "the edit should have recorded a change");
+        assert!(
+            !changes.is_empty(),
+            "the edit should have recorded a change"
+        );
         let mentioned: Vec<String> = changes.iter().flat_map(|c| c.paths().cloned()).collect();
         assert!(
             mentioned.iter().any(|p| p.starts_with("/Foo")),
             "change should mention /Foo, got {mentioned:?}"
         );
-        assert!(live.drain_changes().is_empty(), "queue is empty after drain");
+        assert!(
+            live.drain_changes().is_empty(),
+            "queue is empty after drain"
+        );
     }
 
     /// Namespace edits (define/remove) surface as `resynced` — the signal to
@@ -544,7 +563,10 @@ mod tests {
         live.stage.define_prim("/World").unwrap();
         live.stage.define_prim("/World/Child").unwrap();
         let after_define = live.drain_changes();
-        let resynced: Vec<String> = after_define.iter().flat_map(|c| c.resynced.clone()).collect();
+        let resynced: Vec<String> = after_define
+            .iter()
+            .flat_map(|c| c.resynced.clone())
+            .collect();
         assert!(
             resynced.iter().any(|p| p.starts_with("/World")),
             "defining prims should resync /World, got resynced={resynced:?}"
@@ -564,7 +586,11 @@ mod tests {
     #[test]
     fn edit_reprojects_transform() {
         let stage = Stage::builder().in_memory("e2e.usda").unwrap();
-        stage.define_prim("/Foo").unwrap().set_type_name("Xform").unwrap();
+        stage
+            .define_prim("/Foo")
+            .unwrap()
+            .set_type_name("Xform")
+            .unwrap();
         stage
             .create_attribute("/Foo.xformOp:translate", "double3")
             .unwrap()
@@ -623,7 +649,10 @@ mod tests {
 
         live.stage.remove_prim("/World/NewChild").unwrap();
         apply_changes(&mut world, &live, &mut map);
-        assert!(map.entity("/World/NewChild").is_none(), "removed prim despawned");
+        assert!(
+            map.entity("/World/NewChild").is_none(),
+            "removed prim despawned"
+        );
         assert_eq!(map.len(), base);
         assert!(world.get_entity(child).is_err(), "child entity despawned");
     }
@@ -633,7 +662,11 @@ mod tests {
     #[test]
     fn author_transform_roundtrips_and_notifies() {
         let stage = Stage::builder().in_memory("auth.usda").unwrap();
-        stage.define_prim("/Foo").unwrap().set_type_name("Xform").unwrap();
+        stage
+            .define_prim("/Foo")
+            .unwrap()
+            .set_type_name("Xform")
+            .unwrap();
         let live = LiveStage::new(stage);
 
         let t = Transform::from_xyz(3.0, 4.0, 5.0).with_scale(Vec3::splat(2.0));
@@ -661,23 +694,45 @@ mod tests {
     #[test]
     fn transform_undo_redo() {
         let stage = Stage::builder().in_memory("undo.usda").unwrap();
-        stage.define_prim("/Foo").unwrap().set_type_name("Xform").unwrap();
+        stage
+            .define_prim("/Foo")
+            .unwrap()
+            .set_type_name("Xform")
+            .unwrap();
         let mut hist = TransformHistory::default();
 
-        hist.author(&stage, "/Foo", Transform::from_xyz(1.0, 0.0, 0.0)).unwrap();
-        hist.author(&stage, "/Foo", Transform::from_xyz(2.0, 0.0, 0.0)).unwrap();
+        hist.author(&stage, "/Foo", Transform::from_xyz(1.0, 0.0, 0.0))
+            .unwrap();
+        hist.author(&stage, "/Foo", Transform::from_xyz(2.0, 0.0, 0.0))
+            .unwrap();
         assert_eq!(tx(&stage, "/Foo"), Some(Vec3::new(2.0, 0.0, 0.0)));
 
         assert!(hist.undo(&stage).unwrap());
-        assert_eq!(tx(&stage, "/Foo"), Some(Vec3::new(1.0, 0.0, 0.0)), "undo → previous");
+        assert_eq!(
+            tx(&stage, "/Foo"),
+            Some(Vec3::new(1.0, 0.0, 0.0)),
+            "undo → previous"
+        );
         assert!(hist.undo(&stage).unwrap());
-        assert_eq!(tx(&stage, "/Foo"), None, "undo past the first edit clears the transform");
+        assert_eq!(
+            tx(&stage, "/Foo"),
+            None,
+            "undo past the first edit clears the transform"
+        );
         assert!(!hist.undo(&stage).unwrap(), "nothing left to undo");
 
         assert!(hist.redo(&stage).unwrap());
-        assert_eq!(tx(&stage, "/Foo"), Some(Vec3::new(1.0, 0.0, 0.0)), "redo → first edit");
+        assert_eq!(
+            tx(&stage, "/Foo"),
+            Some(Vec3::new(1.0, 0.0, 0.0)),
+            "redo → first edit"
+        );
         assert!(hist.redo(&stage).unwrap());
-        assert_eq!(tx(&stage, "/Foo"), Some(Vec3::new(2.0, 0.0, 0.0)), "redo → second edit");
+        assert_eq!(
+            tx(&stage, "/Foo"),
+            Some(Vec3::new(2.0, 0.0, 0.0)),
+            "redo → second edit"
+        );
         assert!(!hist.redo(&stage).unwrap(), "nothing left to redo");
     }
 
@@ -686,7 +741,11 @@ mod tests {
     #[test]
     fn plugin_projects_and_reprojects() {
         let stage = Stage::builder().in_memory("app.usda").unwrap();
-        stage.define_prim("/World").unwrap().set_type_name("Xform").unwrap();
+        stage
+            .define_prim("/World")
+            .unwrap()
+            .set_type_name("Xform")
+            .unwrap();
         let live = LiveStage::new(stage);
 
         let mut app = App::new();
@@ -695,7 +754,10 @@ mod tests {
 
         app.world_mut().run_schedule(Update);
         assert!(
-            app.world().resource::<PrimEntities>().entity("/World").is_some(),
+            app.world()
+                .resource::<PrimEntities>()
+                .entity("/World")
+                .is_some(),
             "projected on load"
         );
 
@@ -708,7 +770,10 @@ mod tests {
             .unwrap();
         app.world_mut().run_schedule(Update);
         assert!(
-            app.world().resource::<PrimEntities>().entity("/World/Child").is_some(),
+            app.world()
+                .resource::<PrimEntities>()
+                .entity("/World/Child")
+                .is_some(),
             "reprojected the new prim through the schedule"
         );
     }
@@ -718,13 +783,20 @@ mod tests {
     #[test]
     fn edit_reprojects_visibility() {
         let stage = Stage::builder().in_memory("vis.usda").unwrap();
-        stage.define_prim("/Foo").unwrap().set_type_name("Xform").unwrap();
+        stage
+            .define_prim("/Foo")
+            .unwrap()
+            .set_type_name("Xform")
+            .unwrap();
         let live = LiveStage::new(stage);
         let mut world = World::new();
         let mut map = PrimEntities::default();
         project_stage(&mut world, &live, &mut map);
         let foo = map.entity("/Foo").unwrap();
-        assert_eq!(*world.get::<Visibility>(foo).unwrap(), Visibility::Inherited);
+        assert_eq!(
+            *world.get::<Visibility>(foo).unwrap(),
+            Visibility::Inherited
+        );
 
         live.stage
             .create_attribute("/Foo.visibility", "token")
@@ -758,7 +830,10 @@ mod tests {
     /// the geometry the viewer renders.
     #[test]
     fn project_mesh_attaches_render_components() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/skel_test_simple.usda");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/skel_test_simple.usda"
+        );
         let stage = Stage::open(path).expect("open skel_test_simple.usda");
         let live = LiveStage::new(stage);
         let mut world = World::new();
@@ -769,7 +844,10 @@ mod tests {
 
         let mut q = world.query::<&Mesh3d>();
         let mesh_count = q.iter(&world).count();
-        assert!(mesh_count > 0, "at least one mesh prim should project a Mesh3d");
+        assert!(
+            mesh_count > 0,
+            "at least one mesh prim should project a Mesh3d"
+        );
     }
 
     #[test]
