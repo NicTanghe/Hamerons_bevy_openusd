@@ -128,6 +128,11 @@ impl PrimEntities {
         Some(p)
     }
 
+    /// Every `(path, entity)` currently mapped.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, Entity)> {
+        self.by_path.iter().map(|(p, e)| (p.as_str(), *e))
+    }
+
     pub fn len(&self) -> usize {
         self.by_path.len()
     }
@@ -200,21 +205,74 @@ pub fn project_stage(world: &mut World, live: &LiveStage, map: &mut PrimEntities
     let _ = live.drain_changes();
 }
 
-/// Drain the change queue and reproject affected entities. v1 re-reads the
-/// transform for every touched prim (both `resynced` and `changed_info`);
-/// the full routing despawns/rebuilds subtrees on resync and patches
-/// individual components on info-only changes.
-pub fn apply_changes(world: &mut World, live: &LiveStage, map: &PrimEntities) {
-    for change in live.drain_changes() {
+/// Drain the change queue and reproject affected entities.
+///
+/// * Any `resynced` change → reconcile the entity set against the stage
+///   (spawn entities for new prims, despawn entities for removed prims,
+///   patch the rest). v1 reconciles the whole stage; a later version scopes
+///   to the resynced subtree.
+/// * `changed_info` only → patch the touched prims' transforms in place.
+pub fn apply_changes(world: &mut World, live: &LiveStage, map: &mut PrimEntities) {
+    let changes = live.drain_changes();
+    if changes.is_empty() {
+        return;
+    }
+    if changes.iter().any(|c| !c.resynced.is_empty()) {
+        reconcile(world, live, map);
+        return;
+    }
+    for change in &changes {
         for path in change.paths() {
             let prim = prim_of(path);
-            let Some(entity) = map.entity(prim) else {
-                continue;
-            };
-            let t = transform_at(&live.stage, prim);
+            if let Some(entity) = map.entity(prim) {
+                let t = transform_at(&live.stage, prim);
+                if let Some(mut tr) = world.get_mut::<Transform>(entity) {
+                    *tr = t;
+                }
+            }
+        }
+    }
+}
+
+/// Reconcile the projected entities against the stage's current prims:
+/// despawn entities whose prim was removed, spawn entities for new prims,
+/// patch transforms on the rest.
+fn reconcile(world: &mut World, live: &LiveStage, map: &mut PrimEntities) {
+    let stage = &live.stage;
+    let mut current: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let _ = stage.traverse(openusd::usd::PrimPredicate::default(), |p: &openusd::sdf::Path| {
+        current.insert(p.as_str().to_string());
+    });
+
+    // Despawn entities for prims no longer present.
+    let stale: Vec<(String, Entity)> = map
+        .iter()
+        .filter(|(p, _)| !current.contains(*p))
+        .map(|(p, e)| (p.to_string(), e))
+        .collect();
+    for (path, entity) in stale {
+        world.despawn(entity);
+        map.remove_path(&path);
+    }
+
+    // Spawn new prims; patch transforms on existing ones.
+    for path in &current {
+        let t = transform_at(stage, path);
+        if let Some(entity) = map.entity(path) {
             if let Some(mut tr) = world.get_mut::<Transform>(entity) {
                 *tr = t;
             }
+        } else {
+            let entity = world
+                .spawn((
+                    UsdPrimRef {
+                        path: path.clone(),
+                        ..Default::default()
+                    },
+                    t,
+                ))
+                .id();
+            map.insert(path.clone(), entity);
         }
     }
 }
@@ -318,13 +376,38 @@ mod tests {
             .set(Value::Vec3d(openusd::gf::Vec3d::from([2.0, 5.0, 0.0])))
             .unwrap();
         assert!(live.has_changes(), "the edit fired the sink");
-        apply_changes(&mut world, &live, &map);
+        apply_changes(&mut world, &live, &mut map);
 
         assert_eq!(
             world.get::<Transform>(foo).unwrap().translation,
             Vec3::new(2.0, 5.0, 0.0),
             "sync reprojected the edited transform onto the entity"
         );
+    }
+
+    /// Namespace edits reconcile the entity set: a new prim spawns an
+    /// entity, a removed prim despawns it.
+    #[test]
+    fn resync_spawns_and_despawns_entities() {
+        let stage = Stage::builder().in_memory("rs.usda").unwrap();
+        stage.define_prim("/World").unwrap();
+        let live = LiveStage::new(stage);
+        let mut world = World::new();
+        let mut map = PrimEntities::default();
+        project_stage(&mut world, &live, &mut map);
+        let base = map.len();
+
+        live.stage.define_prim("/World/NewChild").unwrap();
+        apply_changes(&mut world, &live, &mut map);
+        let child = map.entity("/World/NewChild").expect("new prim projected");
+        assert_eq!(map.len(), base + 1);
+        assert!(world.get_entity(child).is_ok(), "child entity exists");
+
+        live.stage.remove_prim("/World/NewChild").unwrap();
+        apply_changes(&mut world, &live, &mut map);
+        assert!(map.entity("/World/NewChild").is_none(), "removed prim despawned");
+        assert_eq!(map.len(), base);
+        assert!(world.get_entity(child).is_err(), "child entity despawned");
     }
 
     #[test]
