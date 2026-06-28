@@ -711,6 +711,21 @@ mod tests {
         );
     }
 
+    /// Open a real `.usda` from disk and project it — the full load path the
+    /// viewer uses, minus the GPU.
+    #[test]
+    fn project_real_usda_file() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/two_xforms.usda");
+        let stage = Stage::open(path).expect("open two_xforms.usda");
+        let live = LiveStage::new(stage);
+        let mut world = World::new();
+        let mut map = PrimEntities::default();
+        project_stage(&mut world, &live, &mut map);
+        for p in ["/World", "/World/ChildA", "/World/ChildB"] {
+            assert!(map.entity(p).is_some(), "{p} should project to an entity");
+        }
+    }
+
     #[test]
     fn prim_entities_bimap_subtree() {
         let mut world = World::new();
