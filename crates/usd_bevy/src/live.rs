@@ -523,6 +523,18 @@ impl TransformHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Kitchen_set.usdz ships its root layer as `Kitchen_set.usd`; this
+    /// verifies the openusd USDZ `.usd` content-sniff fix lets it load.
+    #[test]
+    fn loads_kitchen_usdz() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/external/Kitchen_set.usdz");
+        let stage = Stage::open(path).expect("Kitchen_set.usdz should open");
+        let mut prims = 0usize;
+        let _ = stage.traverse(openusd::usd::PrimPredicate::default(), |_| prims += 1);
+        println!("KITCHEN OK: {prims} prims");
+        assert!(prims > 100, "kitchen should have many prims, got {prims}");
+    }
     use openusd::sdf::Value;
 
     fn tx(stage: &Stage, prim: &str) -> Option<Vec3> {
