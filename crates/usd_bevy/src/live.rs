@@ -148,6 +148,77 @@ impl PrimEntities {
     }
 }
 
+// ─── Projection + reprojection (v1: transforms) ─────────────────────
+//
+// Minimal slice of the project/sync loop: one entity per prim carrying
+// `UsdPrimRef` + `Transform`. Mesh / material / the full field→component
+// routing (RETHINK §12) layer on top of this same shape.
+
+use crate::prim_ref::UsdPrimRef;
+use crate::read::xform::read_transform;
+
+fn to_bevy_transform(t: crate::read::xform::Transform3) -> Transform {
+    Transform {
+        translation: Vec3::from_array(t.translate),
+        rotation: Quat::from_array(t.rotate),
+        scale: Vec3::from_array(t.scale),
+    }
+}
+
+fn transform_at(stage: &Stage, prim_path: &str) -> Transform {
+    openusd::sdf::path(prim_path)
+        .ok()
+        .and_then(|p| read_transform(stage, &p).ok().flatten())
+        .map(to_bevy_transform)
+        .unwrap_or_default()
+}
+
+/// The prim path owning a (possibly property) path: `/Foo.bar` → `/Foo`.
+fn prim_of(path: &str) -> &str {
+    path.split('.').next().unwrap_or(path)
+}
+
+/// Project every prim in the stage into an entity (`UsdPrimRef` +
+/// `Transform`), recording the path↔entity bimap. Idempotent only on an
+/// empty world — call once on load.
+pub fn project_stage(world: &mut World, live: &LiveStage, map: &mut PrimEntities) {
+    let stage = &live.stage;
+    let _ = stage.traverse(openusd::usd::PrimPredicate::default(), |path: &openusd::sdf::Path| {
+        let transform = transform_at(stage, path.as_str());
+        let entity = world
+            .spawn((
+                UsdPrimRef {
+                    path: path.as_str().to_string(),
+                    ..Default::default()
+                },
+                transform,
+            ))
+            .id();
+        map.insert(path.as_str().to_string(), entity);
+    });
+    // Projecting authored the initial read; clear so the first sync starts clean.
+    let _ = live.drain_changes();
+}
+
+/// Drain the change queue and reproject affected entities. v1 re-reads the
+/// transform for every touched prim (both `resynced` and `changed_info`);
+/// the full routing despawns/rebuilds subtrees on resync and patches
+/// individual components on info-only changes.
+pub fn apply_changes(world: &mut World, live: &LiveStage, map: &PrimEntities) {
+    for change in live.drain_changes() {
+        for path in change.paths() {
+            let prim = prim_of(path);
+            let Some(entity) = map.entity(prim) else {
+                continue;
+            };
+            let t = transform_at(&live.stage, prim);
+            if let Some(mut tr) = world.get_mut::<Transform>(entity) {
+                *tr = t;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,6 +279,51 @@ mod tests {
         assert!(
             !after_remove.is_empty(),
             "removing a prim should record a change"
+        );
+    }
+
+    /// The full loop: project a prim's transform into an entity, author a
+    /// new translate on the stage, sync, and confirm the entity's
+    /// `Transform` was reprojected from the edit.
+    #[test]
+    fn edit_reprojects_transform() {
+        let stage = Stage::builder().in_memory("e2e.usda").unwrap();
+        stage.define_prim("/Foo").unwrap().set_type_name("Xform").unwrap();
+        stage
+            .create_attribute("/Foo.xformOp:translate", "double3")
+            .unwrap()
+            .set(Value::Vec3d(openusd::gf::Vec3d::from([1.0, 0.0, 0.0])))
+            .unwrap();
+        stage
+            .create_attribute("/Foo.xformOpOrder", "token[]")
+            .unwrap()
+            .set(Value::TokenVec(vec!["xformOp:translate".into()]))
+            .unwrap();
+
+        let live = LiveStage::new(stage);
+        let mut world = World::new();
+        let mut map = PrimEntities::default();
+        project_stage(&mut world, &live, &mut map);
+
+        let foo = map.entity("/Foo").expect("/Foo projected");
+        assert_eq!(
+            world.get::<Transform>(foo).unwrap().translation,
+            Vec3::new(1.0, 0.0, 0.0),
+            "initial projection reads the authored translate"
+        );
+
+        // Author a new translate; the sink records it; sync reprojects.
+        live.stage
+            .attribute("/Foo.xformOp:translate")
+            .set(Value::Vec3d(openusd::gf::Vec3d::from([2.0, 5.0, 0.0])))
+            .unwrap();
+        assert!(live.has_changes(), "the edit fired the sink");
+        apply_changes(&mut world, &live, &map);
+
+        assert_eq!(
+            world.get::<Transform>(foo).unwrap().translation,
+            Vec3::new(2.0, 5.0, 0.0),
+            "sync reprojected the edited transform onto the entity"
         );
     }
 
