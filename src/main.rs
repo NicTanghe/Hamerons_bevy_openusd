@@ -68,7 +68,7 @@ fn open_usd(world: &mut World) {
     match Stage::open(&path) {
         Ok(stage) => {
             info!("opened USD stage: {path}");
-            world.insert_non_send_resource(LiveStage::new(stage));
+            world.insert_non_send(LiveStage::new(stage));
         }
         Err(e) => error!("failed to open {path}: {e:#}"),
     }

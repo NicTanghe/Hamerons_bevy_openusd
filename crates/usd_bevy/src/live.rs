@@ -38,7 +38,7 @@ impl StageChange {
 }
 
 /// The live, editable USD stage and its change queue. **Non-send** — insert
-/// via `world.insert_non_send_resource(LiveStage::new(stage))`.
+/// via `world.insert_non_send(LiveStage::new(stage))`.
 ///
 /// Authoring goes through `live.stage` (every method is `&self`); each commit
 /// fires the installed sink, which records a [`StageChange`] onto the queue.
@@ -331,7 +331,7 @@ fn reconcile(world: &mut World, live: &LiveStage, map: &mut PrimEntities) {
 // once — which would alias `World`. So the exclusive systems below
 // temporarily *remove* the live stage + bimap from the world, run, and
 // re-insert. An app does: `app.add_plugins(LiveStagePlugin)` then
-// `world.insert_non_send_resource(LiveStage::new(stage))` to start a session.
+// `world.insert_non_send(LiveStage::new(stage))` to start a session.
 
 use bevy::app::{App, Plugin, Update};
 
@@ -348,25 +348,25 @@ impl Plugin for LiveStagePlugin {
 
 /// One-shot projection the first frame a `LiveStage` is present.
 fn project_on_load_system(world: &mut World) {
-    if world.get_non_send_resource::<LiveStage>().is_none() {
+    if world.get_non_send::<LiveStage>().is_none() {
         return;
     }
     // Only project once per session: skip if the bimap is already populated.
     if world.resource::<PrimEntities>().len() > 0 {
         return;
     }
-    let Some(live) = world.remove_non_send_resource::<LiveStage>() else {
+    let Some(live) = world.remove_non_send::<LiveStage>() else {
         return;
     };
     let mut map = world.remove_resource::<PrimEntities>().unwrap_or_default();
     project_stage(world, &live, &mut map);
     world.insert_resource(map);
-    world.insert_non_send_resource(live);
+    world.insert_non_send(live);
 }
 
 /// Drain the live stage's change queue and reproject affected entities.
 fn reproject_system(world: &mut World) {
-    let Some(live) = world.remove_non_send_resource::<LiveStage>() else {
+    let Some(live) = world.remove_non_send::<LiveStage>() else {
         return;
     };
     if live.has_changes() {
@@ -374,7 +374,7 @@ fn reproject_system(world: &mut World) {
         apply_changes(world, &live, &mut map);
         world.insert_resource(map);
     }
-    world.insert_non_send_resource(live);
+    world.insert_non_send(live);
 }
 
 // ─── Authoring back (entity edit → stage) ───────────────────────────
@@ -691,7 +691,7 @@ mod tests {
 
         let mut app = App::new();
         app.add_plugins(LiveStagePlugin);
-        app.world_mut().insert_non_send_resource(live);
+        app.world_mut().insert_non_send(live);
 
         app.world_mut().run_schedule(Update);
         assert!(
@@ -701,7 +701,7 @@ mod tests {
 
         // Author a new prim on the stage; next update reprojects it.
         app.world()
-            .get_non_send_resource::<LiveStage>()
+            .get_non_send::<LiveStage>()
             .unwrap()
             .stage
             .define_prim("/World/Child")
