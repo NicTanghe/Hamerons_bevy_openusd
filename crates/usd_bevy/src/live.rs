@@ -277,6 +277,59 @@ fn reconcile(world: &mut World, live: &LiveStage, map: &mut PrimEntities) {
     }
 }
 
+// ─── Bevy plugin + systems ──────────────────────────────────────────
+//
+// `LiveStage` is `!Send`, and `apply_changes`/`project_stage` need `&mut
+// World` (to spawn/despawn) plus `&LiveStage` plus `&mut PrimEntities` at
+// once — which would alias `World`. So the exclusive systems below
+// temporarily *remove* the live stage + bimap from the world, run, and
+// re-insert. An app does: `app.add_plugins(LiveStagePlugin)` then
+// `world.insert_non_send_resource(LiveStage::new(stage))` to start a session.
+
+use bevy::app::{App, Plugin, Update};
+
+/// Registers the `PrimEntities` bimap and the per-frame reprojection system.
+/// Insert a `LiveStage` non-send resource to begin a live session.
+pub struct LiveStagePlugin;
+
+impl Plugin for LiveStagePlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<PrimEntities>()
+            .add_systems(Update, (project_on_load_system, reproject_system).chain());
+    }
+}
+
+/// One-shot projection the first frame a `LiveStage` is present.
+fn project_on_load_system(world: &mut World) {
+    if world.get_non_send_resource::<LiveStage>().is_none() {
+        return;
+    }
+    // Only project once per session: skip if the bimap is already populated.
+    if world.resource::<PrimEntities>().len() > 0 {
+        return;
+    }
+    let Some(live) = world.remove_non_send_resource::<LiveStage>() else {
+        return;
+    };
+    let mut map = world.remove_resource::<PrimEntities>().unwrap_or_default();
+    project_stage(world, &live, &mut map);
+    world.insert_resource(map);
+    world.insert_non_send_resource(live);
+}
+
+/// Drain the live stage's change queue and reproject affected entities.
+fn reproject_system(world: &mut World) {
+    let Some(live) = world.remove_non_send_resource::<LiveStage>() else {
+        return;
+    };
+    if live.has_changes() {
+        let mut map = world.remove_resource::<PrimEntities>().unwrap_or_default();
+        apply_changes(world, &live, &mut map);
+        world.insert_resource(map);
+    }
+    world.insert_non_send_resource(live);
+}
+
 // ─── Authoring back (entity edit → stage) ───────────────────────────
 //
 // The write direction: an entity's `Transform` (e.g. after a gizmo drag)
@@ -579,6 +632,38 @@ mod tests {
         assert!(hist.redo(&stage).unwrap());
         assert_eq!(tx(&stage, "/Foo"), Some(Vec3::new(2.0, 0.0, 0.0)), "redo → second edit");
         assert!(!hist.redo(&stage).unwrap(), "nothing left to redo");
+    }
+
+    /// The plugin wires it together: projecting on load and reprojecting on
+    /// edit, run through a real Bevy `Update` schedule.
+    #[test]
+    fn plugin_projects_and_reprojects() {
+        let stage = Stage::builder().in_memory("app.usda").unwrap();
+        stage.define_prim("/World").unwrap().set_type_name("Xform").unwrap();
+        let live = LiveStage::new(stage);
+
+        let mut app = App::new();
+        app.add_plugins(LiveStagePlugin);
+        app.world_mut().insert_non_send_resource(live);
+
+        app.world_mut().run_schedule(Update);
+        assert!(
+            app.world().resource::<PrimEntities>().entity("/World").is_some(),
+            "projected on load"
+        );
+
+        // Author a new prim on the stage; next update reprojects it.
+        app.world()
+            .get_non_send_resource::<LiveStage>()
+            .unwrap()
+            .stage
+            .define_prim("/World/Child")
+            .unwrap();
+        app.world_mut().run_schedule(Update);
+        assert!(
+            app.world().resource::<PrimEntities>().entity("/World/Child").is_some(),
+            "reprojected the new prim through the schedule"
+        );
     }
 
     #[test]
