@@ -115,7 +115,11 @@ impl WindowApp for UsdApp {
                     outliner_pane(body, prims, &mut **selected, accent);
                 },
             )
-            .pane(
+            // `pane_in` puts the BUTTON in the Middle cluster so it lines up
+            // with its Middle-anchored pane (the `.pane()` shorthand would
+            // force the button to the Start cluster — see comment above).
+            .pane_in(
+                mara_core::ribbon::RibbonCluster::Middle,
                 PANE_PROPERTIES,
                 "options",
                 "Properties",
