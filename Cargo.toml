@@ -32,7 +32,11 @@ openusd = { git = "https://github.com/mxpv/openusd", rev = "06d619d47ad0fb0d9174
 # `usd_bevy::physics::PhysicsWorld` exposes the Rapier sets we mutate.
 rapier3d-f64 = "0.32"
 
-bevy = { version = "0.18", default-features = false, features = [
+# Bevy 0.19 (needs Rust 1.95+). The bin is a minimal viewport host for the
+# live USD editor (camera/grid/lights + UsdPlugin + LiveStagePlugin + the
+# first-party transform gizmo). The mara panel UI is re-added once mara is
+# on Bevy 0.19.
+bevy = { version = "0.19", default-features = false, features = [
     "std",
     "async_executor",
     "multi_threaded",
@@ -52,6 +56,8 @@ bevy = { version = "0.18", default-features = false, features = [
     "bevy_gizmos",
     "bevy_gizmos_render",
     "bevy_post_process",
+    "bevy_picking",
+    "mesh_picking",
     "morph",
     "default_font",
     "tonemapping_luts",
@@ -71,21 +77,6 @@ bevy = { version = "0.18", default-features = false, features = [
 ] }
 
 anyhow = "1"
-# Native file-picker dialog for the "Browse USD…" button.
-rfd = "0.15"
-# VS-Code-style egui chrome.
-bevy_egui = { version = "0.39", default-features = false, features = [
-    "default_fonts",
-    "render",
-] }
-# Glass-themed editor UI kit (ribbons, panes, pods, widgets, theme) —
-# the evolution of bevy_frost. Local path during co-development; swap
-# to `git = "https://github.com/bresilla/mara"` once pushed/stable.
-bevy_mara = { path = "../mara/mara/plugin/bevy" }
-mara_core = { path = "../mara/crates/core" }
-# Reusable 3D-scene gizmos (axis triads + joint primitives). Pinned to
-# the same rev bevy_mara uses so cargo doesn't pull two copies.
-bevy_glacial = { git = "https://github.com/bresilla/bevy_glacial", rev = "d7bc6d3" }
 
 # `build.rs` bakes a sample USDZ (USDA + procedural PNG) into
 # `assets/external/` so `cargo run -- usdz_sample.usdz` always has

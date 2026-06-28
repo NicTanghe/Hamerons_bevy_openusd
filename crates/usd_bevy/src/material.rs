@@ -116,7 +116,7 @@ pub fn standard_material_from_usd(
 
     // Alpha. `opacityThreshold` wins over `opacity` (UsdPreviewSurface says
     // the threshold kicks the shader into opaque-mask mode).
-    use bevy::render::alpha::AlphaMode;
+    use bevy::material::AlphaMode;
     if let Some(thr) = read.opacity_threshold.filter(|t| *t > 0.0) {
         mat.alpha_mode = AlphaMode::Mask(thr);
     } else if read.opacity.map(|o| o < 1.0).unwrap_or(false) || read.opacity_texture.is_some() {

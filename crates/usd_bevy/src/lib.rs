@@ -1,39 +1,41 @@
-//! `usd_bevy` — load OpenUSD into Bevy + drive a Rapier f64 world.
+//! `usd_bevy` — OpenUSD → Bevy as a **live editor** (RETHINK).
 //!
-//! Single Bevy crate that subsumes:
-//! - the asset loader (`UsdAsset` / `UsdLoader`) and scene projection,
-//! - the marker components (`markers::*` — internal module),
-//! - the Rapier physics adapter (`physics::*` — wraps `usd_rapier`).
+//! The composed USD stage is the source of truth, projected into Bevy
+//! entities and kept in sync off openusd's `StageSink` (`live`), edited via
+//! `authoring`, read through `read`.
+//!
+//! **Bevy 0.19 port note:** the legacy one-shot `Scene`-baking asset loader
+//! (`asset` + `build` + their component builders) is gated off below — Bevy
+//! 0.19 removed the `bevy::scene::Scene` World-container asset and the
+//! `SceneRoot`/`DynamicScene::from_world` it relied on. That projection is
+//! being ported into `live` (direct main-world spawning). Re-enable each
+//! module as it is ported.
 
-pub mod anim;
 pub mod authoring;
-mod asset;
-pub mod read;
-mod build;
-pub mod curves;
-pub mod incremental;
 pub mod live;
-mod light;
 pub mod markers;
-mod material;
-pub mod mesh;
-pub mod nurbs_patch;
-pub mod physics;
-pub(crate) mod physics_attach;
 pub mod prim_ref;
-pub mod skel_anim;
-pub mod tetmesh;
-mod texture;
+pub mod read;
 
-pub use asset::{
-    LightTally, StageCamera, UsdAsset, UsdLoader, UsdLoaderError, UsdLoaderSettings,
-    VariantSelection, VariantSet, author_variant_session_layer, parse_variant_label, variant_label,
-};
-pub use mesh::{mesh_from_usd, mesh_from_usd_subset};
-// Marker components are part of this crate's public API. Living in
-// `markers` keeps the source organised; `pub use` here flattens the
-// import path for downstream callers (intra-crate API surface, not a
-// shim around an upstream crate).
+// ── Legacy Scene-baking projection — gated for the 0.19 port ──────────
+// Removed-in-0.19 deps: `bevy::scene::Scene` (now a BSN trait), `SceneRoot`,
+// `DynamicScene::from_world`. Being ported into `live`.
+// pub mod anim;
+// mod asset;
+// mod build;
+// pub mod curves;
+// pub mod incremental;
+// mod light;
+// mod material;
+// pub mod mesh;
+// pub mod nurbs_patch;
+// pub mod physics;
+// pub(crate) mod physics_attach;
+// pub mod skel_anim;
+// pub mod tetmesh;
+// mod texture;
+
+// Marker components + prim-ref components are the projection's public API.
 pub use markers::*;
 pub use prim_ref::{
     UsdCustomAttrs, UsdDisplayName, UsdKind, UsdLocalExtent, UsdPrimRef, UsdProcedural, UsdPurpose,
@@ -41,21 +43,16 @@ pub use prim_ref::{
 };
 
 use bevy::app::{App, Plugin};
-use bevy::asset::AssetApp;
-use bevy::scene::Scene;
 
-/// Registers the [`UsdAsset`] type, the [`UsdLoader`], the
-/// `UsdPrimRef` reflect registration, and every marker component
-/// from [`markers`] so projected scenes clone through `SceneRoot`.
+/// Registers `UsdPrimRef` + every marker component so they reflect/serialize
+/// correctly. The live editor loop itself is [`live::LiveStagePlugin`] — add
+/// both to an app.
 #[derive(Default)]
 pub struct UsdPlugin;
 
 impl Plugin for UsdPlugin {
     fn build(&self, app: &mut App) {
-        app.init_asset::<Scene>()
-            .init_asset::<UsdAsset>()
-            .init_asset_loader::<UsdLoader>()
-            .register_type::<UsdPrimRef>()
+        app.register_type::<UsdPrimRef>()
             .register_type::<UsdLocalExtent>()
             .register_type::<UsdKind>()
             .register_type::<UsdPurpose>()

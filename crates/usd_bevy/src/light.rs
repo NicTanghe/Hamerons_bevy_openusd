@@ -166,7 +166,7 @@ fn directional_from_usd(d: &ReadDistantLight, _scale: f32) -> DirectionalLight {
     DirectionalLight {
         color: authored_color(&d.common),
         illuminance: 5_000.0,
-        shadows_enabled: true,
+        shadow_maps_enabled: true,
         ..Default::default()
     }
 }
@@ -177,7 +177,7 @@ fn point_from_sphere(s: &ReadSphereLight, scale: f32) -> PointLight {
         color: authored_color(&s.common),
         intensity: brightness(&s.common, scale) * 1000.0,
         range: (radius * 10.0).max(5.0),
-        shadows_enabled: true,
+        shadow_maps_enabled: true,
         ..Default::default()
     }
 }
@@ -192,7 +192,7 @@ fn spot_from_sphere(s: &ReadSphereLight, scale: f32) -> SpotLight {
         range: (s.radius.unwrap_or(0.0) * 10.0).max(5.0),
         outer_angle: outer,
         inner_angle: inner.min(outer - 1.0e-3),
-        shadows_enabled: true,
+        shadow_maps_enabled: true,
         ..Default::default()
     }
 }
@@ -207,7 +207,7 @@ fn spot_from_rect(r: &ReadRectLight, scale: f32) -> SpotLight {
         range: 20.0,
         outer_angle: outer,
         inner_angle: outer * 0.85,
-        shadows_enabled: true,
+        shadow_maps_enabled: true,
         ..Default::default()
     }
 }
@@ -221,7 +221,7 @@ fn spot_from_disk(d: &ReadDiskLight, scale: f32) -> SpotLight {
         range: 20.0,
         outer_angle: outer,
         inner_angle: outer * 0.85,
-        shadows_enabled: true,
+        shadow_maps_enabled: true,
         ..Default::default()
     }
 }
@@ -248,7 +248,7 @@ fn cylinder_fan(
         color: authored_color(&c.common),
         intensity: brightness(&c.common, scale) * 1000.0 * CYLINDER_DIM,
         range: (c.length.unwrap_or(0.5) + c.radius.unwrap_or(0.1) * 10.0).max(2.0),
-        shadows_enabled: false,
+        shadow_maps_enabled: false,
         ..Default::default()
     });
     1

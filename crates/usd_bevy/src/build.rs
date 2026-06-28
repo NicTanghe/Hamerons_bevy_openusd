@@ -606,7 +606,7 @@ pub(crate) fn build_material_inner(
             let looks_like_glass =
                 lower.contains("glass") || lower.contains("acrylic") || lower.contains("transparent");
             if looks_like_glass {
-                use bevy::render::alpha::AlphaMode;
+                use bevy::material::AlphaMode;
                 mat.base_color = bevy::color::Color::srgba(0.85, 0.92, 0.95, 0.18);
                 mat.alpha_mode = AlphaMode::Blend;
                 mat.metallic = 0.0;
