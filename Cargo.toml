@@ -8,7 +8,7 @@ name = "usdview"
 version = "0.0.1"
 edition = "2024"
 license = "MIT"
-description = "Minimal live OpenUSD editor on Bevy."
+description = "Live OpenUSD editor — mara UI host embedding a Bevy viewport."
 repository = "https://github.com/bresilla/bevy_openusd"
 
 [[bin]]
@@ -21,16 +21,15 @@ usd_bevy = { path = "crates/usd_bevy" }
 # Pure-Rust USD — the viewer opens the live `Stage` directly.
 openusd = { git = "https://github.com/mxpv/openusd", rev = "06d619d47ad0fb0d9174c376c41e9d339f4c3290", features = ["geom", "shade"] }
 
-# Bevy 0.19 (needs Rust 1.95+). Minimal viewport host: camera + light +
-# gizmo grid + UsdPlugin + LiveStagePlugin.
+# mara — the egui UI host (window + ribbons/panes) embedding a Bevy viewport.
+mara = { path = "../mara/mara", default-features = false, features = ["window", "bevy"] }
+
+# Bevy 0.19 (needs Rust 1.95+) — the embedded viewport renders the USD scene
+# offscreen into a mara-provided render target.
 bevy = { version = "0.19", default-features = false, features = [
     "std",
-    "async_executor",
-    "multi_threaded",
     "bevy_asset",
     "bevy_log",
-    "bevy_window",
-    "bevy_winit",
     "bevy_render",
     "bevy_core_pipeline",
     "bevy_pbr",
@@ -38,14 +37,10 @@ bevy = { version = "0.19", default-features = false, features = [
     "bevy_mesh",
     "bevy_camera",
     "bevy_image",
-    "bevy_gizmos",
-    "bevy_gizmos_render",
-    "tonemapping_luts",
-    "smaa_luts",
-    "png",
-    "ktx2",
-    "zstd_rust",
-    "x11",
-    "wayland",
     "reflect_auto_register",
 ] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+eframe = { version = "0.34", default-features = false, features = ["default_fonts", "wgpu", "x11"] }
+wgpu = { version = "29", default-features = false, features = ["vulkan"] }
+egui-wgpu = { version = "0.34", default-features = false, features = ["winit"] }
