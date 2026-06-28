@@ -5373,6 +5373,8 @@ dependencies = [
  "mara",
  "openusd",
  "rfd",
+ "tracing",
+ "tracing-subscriber",
  "usd_bevy",
  "wgpu",
 ]

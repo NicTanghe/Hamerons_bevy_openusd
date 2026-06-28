@@ -25,6 +25,10 @@ openusd = { git = "https://github.com/mxpv/openusd", rev = "06d619d47ad0fb0d9174
 mara = { path = "../mara/mara", default-features = false, features = ["window", "bevy"] }
 # Native "Open USD…" file picker.
 rfd = "0.15"
+# Detailed, filterable tracing to stderr (the embedded Bevy app has no
+# LogPlugin, so without this the app's logs go nowhere).
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Bevy 0.19 (needs Rust 1.95+) — the embedded viewport renders the USD scene
 # offscreen into a mara-provided render target.

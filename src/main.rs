@@ -28,7 +28,41 @@ use usd_bevy::UsdPlugin;
 use usd_bevy::live::{LiveStage, LiveStagePlugin, PrimEntities};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    init_tracing();
     mara::window::run::<UsdApp>()
+}
+
+/// Install a stderr tracing subscriber. The embedded Bevy app has no
+/// `LogPlugin`, so without this every `info!`/`error!` (including stage-open
+/// failures) goes nowhere. Override the default filter with `RUST_LOG`, e.g.
+/// `RUST_LOG=usd_bevy=trace,usdview=debug`.
+fn init_tracing() {
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new("warn,usdview=debug,usd_bevy=trace,openusd=info")
+    });
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .try_init();
+}
+
+/// Open a stage + collect its prims, returning a human-readable status line
+/// (logged at info/error too).
+fn open_stage(path: &str) -> (Option<Stage>, Vec<PrimRow>, String) {
+    match Stage::open(path) {
+        Ok(stage) => {
+            let prims = collect_prims(&stage);
+            let status = format!("loaded {} prims — {path}", prims.len());
+            tracing::info!(target: "usdview", "{status}");
+            (Some(stage), prims, status)
+        }
+        Err(e) => {
+            let status = format!("FAILED to open {path}: {e:#}");
+            tracing::error!(target: "usdview", "{status}");
+            (None, Vec::new(), status)
+        }
+    }
 }
 
 // ─── Ribbon / pane ids ──────────────────────────────────────────────
@@ -63,6 +97,8 @@ struct UsdApp {
     stage: Option<Stage>,
     prims: Vec<PrimRow>,
     selected: Option<String>,
+    /// Last load result, shown in the Outliner.
+    status: String,
     /// A file path chosen this frame, applied at the top of the next.
     pending_open: Option<String>,
     /// Shared with the embedded Bevy app so it reloads the viewport.
@@ -71,7 +107,8 @@ struct UsdApp {
 
 impl WindowApp for UsdApp {
     fn new(ctx: CreationContext<'_>) -> Self {
-        let path = std::env::args().nth(1);
+        // Initial file: `USD_FILE` env var, else argv[1], else none.
+        let path = std::env::var("USD_FILE").ok().or_else(|| std::env::args().nth(1));
         let viewport_path = path.clone();
         let load_queue: LoadSlot = Arc::new(Mutex::new(None));
         let queue = load_queue.clone();
@@ -80,8 +117,10 @@ impl WindowApp for UsdApp {
             move |app: &mut App| configure_usd_app(app, viewport_path.clone(), queue.clone()),
         );
 
-        let stage = path.as_deref().and_then(|p| Stage::open(p).ok());
-        let prims = stage.as_ref().map(collect_prims).unwrap_or_default();
+        let (stage, prims, status) = match path.as_deref() {
+            Some(p) => open_stage(p),
+            None => (None, Vec::new(), "no file — use Open USD…".to_string()),
+        };
 
         Self {
             bevy_view,
@@ -89,6 +128,7 @@ impl WindowApp for UsdApp {
             stage,
             prims,
             selected: None,
+            status,
             pending_open: None,
             load_queue,
         }
@@ -98,8 +138,10 @@ impl WindowApp for UsdApp {
         // Apply a file-open chosen last frame: reload the read-side stage for
         // the panes, and signal the embedded viewport to reload too.
         if let Some(path) = self.pending_open.take() {
-            self.stage = Stage::open(&path).ok();
-            self.prims = self.stage.as_ref().map(collect_prims).unwrap_or_default();
+            let (stage, prims, status) = open_stage(&path);
+            self.stage = stage;
+            self.prims = prims;
+            self.status = status;
             self.selected = None;
             *self.load_queue.lock().unwrap() = Some(path);
         }
@@ -110,6 +152,7 @@ impl WindowApp for UsdApp {
             stage,
             prims,
             selected,
+            status,
             ..
         } = self;
         // Apply the mara theme every frame (without this the panes/ribbons
@@ -136,7 +179,7 @@ impl WindowApp for UsdApp {
                 PaneAnchor::LeftRail(RailZone::Start),
                 |body| {
                     let mut selected = selected.borrow_mut();
-                    outliner_pane(body, prims, &mut **selected, accent);
+                    outliner_pane(body, prims, &mut **selected, status.as_str(), accent);
                 },
             )
             .pane(
@@ -241,8 +284,17 @@ fn outliner_pane(
     body: &mut PaneBody,
     prims: &[PrimRow],
     selected: &mut Option<String>,
+    status: &str,
     accent: MaraColor32,
 ) {
+    // Load status (shows failures like "FAILED to open … unsupported .usd").
+    body.add_normal(
+        "usd.status",
+        "Status",
+        "list",
+        vec![Pod::new(MaraId::new(("usd.outliner", "status"))).with_readout("", status)],
+    );
+
     let tree_root = MaraId::new(("usd.outliner", "tree_root"));
     let sel_key = tree_root.with("selected");
     // Selection from last frame (the tree writes it during render).
