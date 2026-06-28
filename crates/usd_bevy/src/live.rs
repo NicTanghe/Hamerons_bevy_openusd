@@ -524,16 +524,18 @@ impl TransformHistory {
 mod tests {
     use super::*;
 
-    /// Kitchen_set.usdz ships its root layer as `Kitchen_set.usd`; this
-    /// verifies the openusd USDZ `.usd` content-sniff fix lets it load.
+    /// Kitchen_set.usdz's root layer is `Kitchen_set.usd`, so this exercises
+    /// the openusd USDZ `.usd`-layer content-sniff fix (without it the stage
+    /// won't even open). NOTE: its geometry is behind references to other
+    /// files *inside* the usdz, which openusd doesn't resolve yet — so the
+    /// composed stage is structure-only (0 meshes). See OPENUSD_ISSUE.md.
     #[test]
     fn loads_kitchen_usdz() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/external/Kitchen_set.usdz");
         let stage = Stage::open(path).expect("Kitchen_set.usdz should open");
         let mut prims = 0usize;
         let _ = stage.traverse(openusd::usd::PrimPredicate::default(), |_| prims += 1);
-        println!("KITCHEN OK: {prims} prims");
-        assert!(prims > 100, "kitchen should have many prims, got {prims}");
+        assert!(prims > 100, "kitchen root layer should compose, got {prims}");
     }
     use openusd::sdf::Value;
 

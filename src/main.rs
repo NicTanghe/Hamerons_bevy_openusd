@@ -27,24 +27,61 @@ use openusd::usd::Stage;
 use usd_bevy::UsdPlugin;
 use usd_bevy::live::{LiveStage, LiveStagePlugin, PrimEntities};
 
+/// Everything (trace + panics + backtraces) is mirrored here so a hard crash
+/// is still recoverable after the window dies.
+const LOG_FILE: &str = "/tmp/usdview.log";
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
+    install_panic_logger();
+    tracing::info!(target: "usdview", "usdview starting — full log at {LOG_FILE}");
     mara::window::run::<UsdApp>()
 }
 
-/// Install a stderr tracing subscriber. The embedded Bevy app has no
-/// `LogPlugin`, so without this every `info!`/`error!` (including stage-open
-/// failures) goes nowhere. Override the default filter with `RUST_LOG`, e.g.
-/// `RUST_LOG=usd_bevy=trace,usdview=debug`.
+/// Tracing to BOTH stderr and [`LOG_FILE`]. The embedded Bevy app has no
+/// `LogPlugin`, so without this the logs go nowhere; the file copy survives a
+/// crash that eats stderr. Override the filter with `RUST_LOG`.
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("warn,usdview=debug,usd_bevy=trace,openusd=info")
-    });
+    use tracing_subscriber::fmt::writer::MakeWriterExt;
+    let _ = std::fs::write(LOG_FILE, ""); // truncate per run
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("warn,usdview=trace,usd_bevy=trace,openusd=info"));
+    let to_file = || {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(LOG_FILE)
+            .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap())
+    };
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(true)
+        .with_ansi(false)
+        .with_writer(std::io::stderr.and(to_file))
         .try_init();
+}
+
+/// Capture panics (message + full backtrace) to the log file and stderr —
+/// otherwise a panic inside the embedded app vanishes with the window.
+fn install_panic_logger() {
+    unsafe {
+        if std::env::var_os("RUST_BACKTRACE").is_none() {
+            std::env::set_var("RUST_BACKTRACE", "full");
+        }
+    }
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let msg = format!("\n==== usdview PANIC ====\n{info}\n{backtrace}\n");
+        tracing::error!(target: "usdview", "PANIC: {info}");
+        eprint!("{msg}");
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(LOG_FILE) {
+            let _ = f.write_all(msg.as_bytes());
+        }
+        prev(info);
+    }));
 }
 
 /// Open a stage + collect its prims, returning a human-readable status line
