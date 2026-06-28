@@ -311,10 +311,94 @@ pub fn author_transform(
     Ok(())
 }
 
+/// Current authored transform of a prim, if any.
+pub fn current_transform(stage: &Stage, prim_path: &str) -> Option<Transform> {
+    openusd::sdf::path(prim_path)
+        .ok()
+        .and_then(|p| read_transform(stage, &p).ok().flatten())
+        .map(to_bevy_transform)
+}
+
+fn clear_transform(stage: &Stage, prim_path: &str) -> anyhow::Result<()> {
+    let prim = openusd::sdf::path(prim_path)?;
+    let _ = stage.remove_property(prim.append_property("xformOp:transform")?);
+    let _ = stage.remove_property(prim.append_property("xformOpOrder")?);
+    Ok(())
+}
+
+// ─── Undo / redo for transform edits (RETHINK P6, gizmo slice) ───────
+//
+// Typed-action history: each edit captures the prim's transform before +
+// after, so undo re-authors the prior state (or clears it if there was
+// none) and redo re-applies. General attribute / namespace undo via
+// openusd `Diff` inverses is the next layer.
+
+struct TransformEdit {
+    prim: String,
+    before: Option<Transform>,
+    after: Transform,
+}
+
+/// Undo/redo stack for transform edits.
+#[derive(Default)]
+pub struct TransformHistory {
+    undo: Vec<TransformEdit>,
+    redo: Vec<TransformEdit>,
+}
+
+impl TransformHistory {
+    /// Author `after` onto `prim`, recording the prior transform for undo.
+    pub fn author(&mut self, stage: &Stage, prim: &str, after: Transform) -> anyhow::Result<()> {
+        let before = current_transform(stage, prim);
+        author_transform(stage, prim, &after)?;
+        self.undo.push(TransformEdit {
+            prim: prim.to_string(),
+            before,
+            after,
+        });
+        self.redo.clear();
+        Ok(())
+    }
+
+    /// Undo the most recent edit. Returns `false` if nothing to undo.
+    pub fn undo(&mut self, stage: &Stage) -> anyhow::Result<bool> {
+        let Some(edit) = self.undo.pop() else {
+            return Ok(false);
+        };
+        match &edit.before {
+            Some(t) => author_transform(stage, &edit.prim, t)?,
+            None => clear_transform(stage, &edit.prim)?,
+        }
+        self.redo.push(edit);
+        Ok(true)
+    }
+
+    /// Redo the most recently undone edit. Returns `false` if nothing to redo.
+    pub fn redo(&mut self, stage: &Stage) -> anyhow::Result<bool> {
+        let Some(edit) = self.redo.pop() else {
+            return Ok(false);
+        };
+        author_transform(stage, &edit.prim, &edit.after)?;
+        self.undo.push(edit);
+        Ok(true)
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use openusd::sdf::Value;
+
+    fn tx(stage: &Stage, prim: &str) -> Option<Vec3> {
+        current_transform(stage, prim).map(|t| t.translation)
+    }
 
     /// The `UsdNotice` loop: authoring an edit fires the sink, and the change
     /// (mentioning the edited path) lands on the drainable queue. This is the
@@ -470,6 +554,31 @@ mod tests {
             "scale round-trips, got {:?}",
             back.scale
         );
+    }
+
+    /// Undo/redo walks the transform history: undo restores the prior value
+    /// (or clears it when there was none), redo re-applies.
+    #[test]
+    fn transform_undo_redo() {
+        let stage = Stage::builder().in_memory("undo.usda").unwrap();
+        stage.define_prim("/Foo").unwrap().set_type_name("Xform").unwrap();
+        let mut hist = TransformHistory::default();
+
+        hist.author(&stage, "/Foo", Transform::from_xyz(1.0, 0.0, 0.0)).unwrap();
+        hist.author(&stage, "/Foo", Transform::from_xyz(2.0, 0.0, 0.0)).unwrap();
+        assert_eq!(tx(&stage, "/Foo"), Some(Vec3::new(2.0, 0.0, 0.0)));
+
+        assert!(hist.undo(&stage).unwrap());
+        assert_eq!(tx(&stage, "/Foo"), Some(Vec3::new(1.0, 0.0, 0.0)), "undo → previous");
+        assert!(hist.undo(&stage).unwrap());
+        assert_eq!(tx(&stage, "/Foo"), None, "undo past the first edit clears the transform");
+        assert!(!hist.undo(&stage).unwrap(), "nothing left to undo");
+
+        assert!(hist.redo(&stage).unwrap());
+        assert_eq!(tx(&stage, "/Foo"), Some(Vec3::new(1.0, 0.0, 0.0)), "redo → first edit");
+        assert!(hist.redo(&stage).unwrap());
+        assert_eq!(tx(&stage, "/Foo"), Some(Vec3::new(2.0, 0.0, 0.0)), "redo → second edit");
+        assert!(!hist.redo(&stage).unwrap(), "nothing left to redo");
     }
 
     #[test]
