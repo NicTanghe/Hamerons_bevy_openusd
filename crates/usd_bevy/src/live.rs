@@ -533,9 +533,18 @@ mod tests {
     fn loads_kitchen_usdz() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/external/Kitchen_set.usdz");
         let stage = Stage::open(path).expect("Kitchen_set.usdz should open");
-        let mut prims = 0usize;
-        let _ = stage.traverse(openusd::usd::PrimPredicate::default(), |_| prims += 1);
-        assert!(prims > 100, "kitchen root layer should compose, got {prims}");
+        let mut meshes = 0usize;
+        let _ = stage.traverse(openusd::usd::PrimPredicate::default(), |p: &openusd::sdf::Path| {
+            if let Ok(Some(m)) = crate::read::geom::read_mesh(&stage, p) {
+                if !m.points.is_empty() {
+                    meshes += 1;
+                }
+            }
+        });
+        // Kitchen's geometry is behind references to other files *inside* the
+        // usdz; this asserts the openusd package-resolution fix resolves them.
+        println!("KITCHEN meshes: {meshes}");
+        assert!(meshes > 1000, "kitchen packaged meshes should resolve, got {meshes}");
     }
     use openusd::sdf::Value;
 
