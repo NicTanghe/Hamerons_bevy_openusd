@@ -160,6 +160,7 @@ impl PrimEntities {
 // routing (RETHINK §12) layer on top of this same shape.
 
 use crate::prim_ref::UsdPrimRef;
+use crate::read::geom::{read_visibility, VisibilityState};
 use crate::read::xform::read_transform;
 
 fn to_bevy_transform(t: crate::read::xform::Transform3) -> Transform {
@@ -178,6 +179,29 @@ fn transform_at(stage: &Stage, prim_path: &str) -> Transform {
         .unwrap_or_default()
 }
 
+fn visibility_at(stage: &Stage, prim_path: &str) -> Visibility {
+    match openusd::sdf::path(prim_path)
+        .ok()
+        .and_then(|p| read_visibility(stage, &p).ok())
+    {
+        Some(VisibilityState::Invisible) => Visibility::Hidden,
+        _ => Visibility::default(),
+    }
+}
+
+/// Re-read and patch the per-prim components we project (the §12 routing
+/// target). v1: `Transform` + `Visibility`; mesh/material/light extend here.
+fn patch_prim(world: &mut World, stage: &Stage, entity: Entity, prim: &str) {
+    let t = transform_at(stage, prim);
+    if let Some(mut tr) = world.get_mut::<Transform>(entity) {
+        *tr = t;
+    }
+    let v = visibility_at(stage, prim);
+    if let Some(mut vis) = world.get_mut::<Visibility>(entity) {
+        *vis = v;
+    }
+}
+
 /// The prim path owning a (possibly property) path: `/Foo.bar` → `/Foo`.
 fn prim_of(path: &str) -> &str {
     path.split('.').next().unwrap_or(path)
@@ -189,14 +213,14 @@ fn prim_of(path: &str) -> &str {
 pub fn project_stage(world: &mut World, live: &LiveStage, map: &mut PrimEntities) {
     let stage = &live.stage;
     let _ = stage.traverse(openusd::usd::PrimPredicate::default(), |path: &openusd::sdf::Path| {
-        let transform = transform_at(stage, path.as_str());
         let entity = world
             .spawn((
                 UsdPrimRef {
                     path: path.as_str().to_string(),
                     ..Default::default()
                 },
-                transform,
+                transform_at(stage, path.as_str()),
+                visibility_at(stage, path.as_str()),
             ))
             .id();
         map.insert(path.as_str().to_string(), entity);
@@ -225,10 +249,7 @@ pub fn apply_changes(world: &mut World, live: &LiveStage, map: &mut PrimEntities
         for path in change.paths() {
             let prim = prim_of(path);
             if let Some(entity) = map.entity(prim) {
-                let t = transform_at(&live.stage, prim);
-                if let Some(mut tr) = world.get_mut::<Transform>(entity) {
-                    *tr = t;
-                }
+                patch_prim(world, &live.stage, entity, prim);
             }
         }
     }
@@ -255,13 +276,10 @@ fn reconcile(world: &mut World, live: &LiveStage, map: &mut PrimEntities) {
         map.remove_path(&path);
     }
 
-    // Spawn new prims; patch transforms on existing ones.
+    // Spawn new prims; patch components on existing ones.
     for path in &current {
-        let t = transform_at(stage, path);
         if let Some(entity) = map.entity(path) {
-            if let Some(mut tr) = world.get_mut::<Transform>(entity) {
-                *tr = t;
-            }
+            patch_prim(world, stage, entity, path);
         } else {
             let entity = world
                 .spawn((
@@ -269,7 +287,8 @@ fn reconcile(world: &mut World, live: &LiveStage, map: &mut PrimEntities) {
                         path: path.clone(),
                         ..Default::default()
                     },
-                    t,
+                    transform_at(stage, path),
+                    visibility_at(stage, path),
                 ))
                 .id();
             map.insert(path.clone(), entity);
@@ -663,6 +682,32 @@ mod tests {
         assert!(
             app.world().resource::<PrimEntities>().entity("/World/Child").is_some(),
             "reprojected the new prim through the schedule"
+        );
+    }
+
+    /// Visibility routes like transforms: authoring `visibility = invisible`
+    /// reprojects the entity's `Visibility` to `Hidden`.
+    #[test]
+    fn edit_reprojects_visibility() {
+        let stage = Stage::builder().in_memory("vis.usda").unwrap();
+        stage.define_prim("/Foo").unwrap().set_type_name("Xform").unwrap();
+        let live = LiveStage::new(stage);
+        let mut world = World::new();
+        let mut map = PrimEntities::default();
+        project_stage(&mut world, &live, &mut map);
+        let foo = map.entity("/Foo").unwrap();
+        assert_eq!(*world.get::<Visibility>(foo).unwrap(), Visibility::Inherited);
+
+        live.stage
+            .create_attribute("/Foo.visibility", "token")
+            .unwrap()
+            .set(Value::Token("invisible".into()))
+            .unwrap();
+        apply_changes(&mut world, &live, &mut map);
+        assert_eq!(
+            *world.get::<Visibility>(foo).unwrap(),
+            Visibility::Hidden,
+            "visibility=invisible reprojected to Hidden"
         );
     }
 
