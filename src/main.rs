@@ -21,10 +21,11 @@ use mara_core::widget::{TreeBody, TreeIconKind, TreeIconSlot};
 use mara_core::{RibbonAvoidance, WorkspaceStack};
 
 use std::cell::RefCell;
+use std::sync::{Arc, Mutex};
 
 use openusd::usd::Stage;
 use usd_bevy::UsdPlugin;
-use usd_bevy::live::{LiveStage, LiveStagePlugin};
+use usd_bevy::live::{LiveStage, LiveStagePlugin, PrimEntities};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     mara::window::run::<UsdApp>()
@@ -36,6 +37,11 @@ const RIBBON_LEFT: &str = "usd_ribbon_left";
 const PANE_OUTLINER: &str = "usd_pane_outliner";
 const PANE_PROPERTIES: &str = "usd_pane_properties";
 const ACTION_SAVE: &str = "usd_action_save";
+const ACTION_OPEN: &str = "usd_action_open";
+
+/// Shared path slot: the egui Open action pushes a file here; a Bevy system
+/// (`poll_reload`) picks it up and swaps the live stage.
+type LoadSlot = Arc<Mutex<Option<String>>>;
 
 fn ribbon_action(id: &'static str) -> RibbonAction {
     RibbonAction::Command(MaraId::new(id))
@@ -57,15 +63,21 @@ struct UsdApp {
     stage: Option<Stage>,
     prims: Vec<PrimRow>,
     selected: Option<String>,
+    /// A file path chosen this frame, applied at the top of the next.
+    pending_open: Option<String>,
+    /// Shared with the embedded Bevy app so it reloads the viewport.
+    load_queue: LoadSlot,
 }
 
 impl WindowApp for UsdApp {
     fn new(ctx: CreationContext<'_>) -> Self {
         let path = std::env::args().nth(1);
         let viewport_path = path.clone();
+        let load_queue: LoadSlot = Arc::new(Mutex::new(None));
+        let queue = load_queue.clone();
         let bevy_view = mara_bevy::MaraBevyViewport::with_render_state_and_content(
             ctx.render_state,
-            move |app: &mut App| configure_usd_app(app, viewport_path.clone()),
+            move |app: &mut App| configure_usd_app(app, viewport_path.clone(), queue.clone()),
         );
 
         let stage = path.as_deref().and_then(|p| Stage::open(p).ok());
@@ -77,16 +89,28 @@ impl WindowApp for UsdApp {
             stage,
             prims,
             selected: None,
+            pending_open: None,
+            load_queue,
         }
     }
 
     fn update(&mut self, host: &mut MaraHostCtx<'_>) {
+        // Apply a file-open chosen last frame: reload the read-side stage for
+        // the panes, and signal the embedded viewport to reload too.
+        if let Some(path) = self.pending_open.take() {
+            self.stage = Stage::open(&path).ok();
+            self.prims = self.stage.as_ref().map(collect_prims).unwrap_or_default();
+            self.selected = None;
+            *self.load_queue.lock().unwrap() = Some(path);
+        }
+
         let Self {
             bevy_view,
             workspace,
             stage,
             prims,
             selected,
+            ..
         } = self;
         // Apply the mara theme every frame (without this the panes/ribbons
         // render with raw-egui defaults).
@@ -126,11 +150,18 @@ impl WindowApp for UsdApp {
                 },
             )
             .action(
+                ACTION_OPEN,
+                "folder",
+                "Open USD…",
+                ribbon_action(ACTION_OPEN),
+            )
+            .action(
                 ACTION_SAVE,
                 "document",
                 "Save stage",
                 ribbon_action(ACTION_SAVE),
             );
+        let mut picked: Option<String> = None;
         for click in host.show_ribbon_rail(rail, accent) {
             if click.action == ribbon_action(ACTION_SAVE) {
                 if let Some(stage) = stage.as_ref() {
@@ -139,7 +170,19 @@ impl WindowApp for UsdApp {
                         Err(e) => error!("save failed: {e:#}"),
                     }
                 }
+            } else if click.action == ribbon_action(ACTION_OPEN) {
+                if let Some(file) = rfd::FileDialog::new()
+                    .add_filter("USD", &["usd", "usda", "usdc", "usdz"])
+                    .pick_file()
+                {
+                    picked = Some(file.to_string_lossy().into_owned());
+                }
             }
+        }
+        // Release the borrow of `self.selected` before touching `self` again.
+        drop(selected);
+        if let Some(p) = picked {
+            self.pending_open = Some(p);
         }
     }
 }
@@ -358,7 +401,11 @@ fn properties_pane(body: &mut PaneBody, stage: &Option<Stage>, selected: &Option
 #[derive(Resource, Clone)]
 struct UsdArg(Option<String>);
 
-fn configure_usd_app(app: &mut App, path: Option<String>) {
+/// The shared load slot, as a Bevy resource the reload system reads.
+#[derive(Resource, Clone)]
+struct LoadQueue(LoadSlot);
+
+fn configure_usd_app(app: &mut App, path: Option<String>, load_queue: LoadSlot) {
     // The mara viewport already adds GroundGridPlugin + the core/render
     // plugins; we add only our own and configure the grid resource.
     app.add_plugins((UsdPlugin, LiveStagePlugin))
@@ -369,12 +416,47 @@ fn configure_usd_app(app: &mut App, path: Option<String>) {
         })
         .insert_resource(ClearColor(Color::srgb_u8(12, 14, 18)))
         .insert_resource(UsdArg(path))
+        .insert_resource(LoadQueue(load_queue))
         .add_systems(
             Startup,
             setup_camera.after(mara_bevy::BevyViewportSet::SetupTarget),
         )
         .add_systems(Startup, open_usd)
-        .add_systems(Update, mara_bevy::apply_viewport_camera_input_system);
+        .add_systems(Update, mara_bevy::apply_viewport_camera_input_system)
+        .add_systems(Update, poll_reload);
+}
+
+/// Pick up a path pushed by the egui "Open" action, despawn the current scene,
+/// and install a fresh `LiveStage` (which `LiveStagePlugin` then reprojects).
+fn poll_reload(world: &mut World) {
+    let path = world
+        .resource::<LoadQueue>()
+        .0
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take());
+    let Some(path) = path else {
+        return;
+    };
+
+    world.remove_non_send::<LiveStage>();
+    let entities: Vec<Entity> = world
+        .resource::<PrimEntities>()
+        .iter()
+        .map(|(_, e)| e)
+        .collect();
+    for entity in entities {
+        world.despawn(entity);
+    }
+    *world.resource_mut::<PrimEntities>() = PrimEntities::default();
+
+    match Stage::open(&path) {
+        Ok(stage) => {
+            info!("reloaded USD stage: {path}");
+            world.insert_non_send(LiveStage::new(stage));
+        }
+        Err(e) => error!("failed to reload {path}: {e:#}"),
+    }
 }
 
 fn setup_camera(
