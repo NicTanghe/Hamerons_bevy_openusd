@@ -27,7 +27,7 @@ pub mod read;
 // pub mod incremental;
 // mod light;
 // mod material;
-// pub mod mesh;
+pub mod mesh;
 // pub mod nurbs_patch;
 // pub mod physics;
 // pub(crate) mod physics_attach;

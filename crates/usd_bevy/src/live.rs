@@ -202,6 +202,32 @@ fn patch_prim(world: &mut World, stage: &Stage, entity: Entity, prim: &str) {
     }
 }
 
+/// If `prim` is a mesh, build a Bevy mesh + a default material and attach
+/// `Mesh3d`/`MeshMaterial3d`. No-op when the render `Assets` aren't present
+/// (headless) or the prim has no mesh. (Real material binding lands when the
+/// material reader is ported into `live`.)
+fn attach_mesh(world: &mut World, stage: &Stage, entity: Entity, prim: &str) {
+    let Some(p) = openusd::sdf::path(prim).ok() else {
+        return;
+    };
+    let Ok(Some(read)) = crate::read::geom::read_mesh(stage, &p) else {
+        return;
+    };
+    if world.get_resource::<Assets<Mesh>>().is_none()
+        || world.get_resource::<Assets<StandardMaterial>>().is_none()
+    {
+        return;
+    }
+    let mesh = crate::mesh::mesh_from_usd(&read);
+    let mesh_handle = world.resource_mut::<Assets<Mesh>>().add(mesh);
+    let material = world
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(StandardMaterial::default());
+    world
+        .entity_mut(entity)
+        .insert((Mesh3d(mesh_handle), MeshMaterial3d(material)));
+}
+
 /// The prim path owning a (possibly property) path: `/Foo.bar` → `/Foo`.
 fn prim_of(path: &str) -> &str {
     path.split('.').next().unwrap_or(path)
@@ -224,6 +250,7 @@ pub fn project_stage(world: &mut World, live: &LiveStage, map: &mut PrimEntities
             ))
             .id();
         map.insert(path.as_str().to_string(), entity);
+        attach_mesh(world, stage, entity, path.as_str());
     });
     // Projecting authored the initial read; clear so the first sync starts clean.
     let _ = live.drain_changes();
@@ -292,6 +319,7 @@ fn reconcile(world: &mut World, live: &LiveStage, map: &mut PrimEntities) {
                 ))
                 .id();
             map.insert(path.clone(), entity);
+            attach_mesh(world, stage, entity, path);
         }
     }
 }
@@ -724,6 +752,24 @@ mod tests {
         for p in ["/World", "/World/ChildA", "/World/ChildB"] {
             assert!(map.entity(p).is_some(), "{p} should project to an entity");
         }
+    }
+
+    /// With the render `Assets` present, mesh prims project `Mesh3d` —
+    /// the geometry the viewer renders.
+    #[test]
+    fn project_mesh_attaches_render_components() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/skel_test_simple.usda");
+        let stage = Stage::open(path).expect("open skel_test_simple.usda");
+        let live = LiveStage::new(stage);
+        let mut world = World::new();
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(Assets::<StandardMaterial>::default());
+        let mut map = PrimEntities::default();
+        project_stage(&mut world, &live, &mut map);
+
+        let mut q = world.query::<&Mesh3d>();
+        let mesh_count = q.iter(&world).count();
+        assert!(mesh_count > 0, "at least one mesh prim should project a Mesh3d");
     }
 
     #[test]
