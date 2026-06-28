@@ -292,7 +292,7 @@ fn outliner_pane(
         "usd.status",
         "Status",
         "list",
-        vec![Pod::new(MaraId::new(("usd.outliner", "status"))).with_readout("", status)],
+        vec![Pod::new(MaraId::new(("usd.outliner", "status"))).with_readout("file", status)],
     );
 
     let tree_root = MaraId::new(("usd.outliner", "tree_root"));
