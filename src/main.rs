@@ -11,11 +11,13 @@ use mara::host::{MaraHostCtx, RibbonRail};
 use mara::ui::mara_core;
 use mara::ui::modules::bevy as mara_bevy;
 use mara::window::{CreationContext, WindowApp};
+use mara_core::container::SeparatorStyle;
 use mara_core::pane::{PaneAnchor, PaneBody, RailZone};
 use mara_core::pod::Pod;
 use mara_core::ribbon::RibbonAction;
-use mara_core::style::active_accent;
+use mara_core::style::{AccentColor, GlassOpacity, Mode, active_accent};
 use mara_core::vocab::{Color32 as MaraColor32, Id as MaraId};
+use mara_core::widget::{TreeBody, TreeIconKind, TreeIconSlot};
 use mara_core::{RibbonAvoidance, WorkspaceStack};
 
 use std::cell::RefCell;
@@ -44,7 +46,6 @@ fn ribbon_action(id: &'static str) -> RibbonAction {
 struct PrimRow {
     path: String,
     name: String,
-    depth: u32,
 }
 
 /// The mara window app.
@@ -87,6 +88,10 @@ impl WindowApp for UsdApp {
             prims,
             selected,
         } = self;
+        // Apply the mara theme every frame (without this the panes/ribbons
+        // render with raw-egui defaults).
+        mara_core::style::set_theme(mara_core::style::theme_pro(Mode::Dark));
+        host.apply_theme(AccentColor::default(), GlassOpacity::default());
         let accent = active_accent();
 
         // Viewport (root, behind the ribbon-avoiding panes).
@@ -146,15 +151,44 @@ fn collect_prims(stage: &Stage) -> Vec<PrimRow> {
         |path: &openusd::sdf::Path| {
             let s = path.as_str();
             let name = s.rsplit('/').next().unwrap_or(s).to_string();
-            let depth = (s.matches('/').count() as u32).saturating_sub(1);
             out.push(PrimRow {
                 path: s.to_string(),
                 name,
-                depth,
             });
         },
     );
     out
+}
+
+/// A node in the prim hierarchy (built from the flat traversal list).
+struct UsdNode {
+    path: String,
+    name: String,
+    children: Vec<usize>,
+}
+
+/// Build the prim hierarchy + the root indices from the flat, depth-ordered
+/// prim list. A prim's parent is the path up to its last `/`.
+fn build_usd_tree(prims: &[PrimRow]) -> (Vec<UsdNode>, Vec<usize>) {
+    let mut nodes: Vec<UsdNode> = prims
+        .iter()
+        .map(|p| UsdNode {
+            path: p.path.clone(),
+            name: p.name.clone(),
+            children: Vec::new(),
+        })
+        .collect();
+    let index: std::collections::HashMap<&str, usize> =
+        prims.iter().enumerate().map(|(i, p)| (p.path.as_str(), i)).collect();
+    let mut roots = Vec::new();
+    for (i, p) in prims.iter().enumerate() {
+        let parent = &p.path[..p.path.rfind('/').unwrap_or(0)];
+        match (!parent.is_empty()).then(|| index.get(parent)).flatten() {
+            Some(&pi) => nodes[pi].children.push(i),
+            None => roots.push(i),
+        }
+    }
+    (nodes, roots)
 }
 
 fn outliner_pane(
@@ -163,23 +197,113 @@ fn outliner_pane(
     selected: &mut Option<String>,
     accent: MaraColor32,
 ) {
-    let pods: Vec<Pod> = prims
-        .iter()
-        .map(|p| {
-            let label = format!("{}{}", "    ".repeat(p.depth as usize), p.name);
-            Pod::new(MaraId::new(p.path.as_str())).with_button(label, accent)
-        })
-        .collect();
-    body.add_normal("usd.outliner", "Outliner", "list", pods);
+    let tree_root = MaraId::new(("usd.outliner", "tree_root"));
+    let sel_key = tree_root.with("selected");
+    // Selection from last frame (the tree writes it during render).
+    let sel = body.temp_string(sel_key).unwrap_or_default();
+    *selected = (!sel.is_empty()).then(|| sel.clone());
 
-    let rendered = body.render();
-    for p in prims {
-        if let Some(resps) = rendered.get(&MaraId::new(p.path.as_str())) {
-            if resps.iter().any(|r| r.buttons.iter().any(|b| b.clicked)) {
-                *selected = Some(p.path.clone());
-            }
+    let search_id = MaraId::new(("usd.outliner", "scene", 0usize));
+    let filter = body.search_query(search_id, 0).to_lowercase();
+    let (nodes, roots) = build_usd_tree(prims);
+
+    body.add_normal(
+        "usd.outliner",
+        "Scene",
+        "folder",
+        vec![
+            Pod::new(search_id)
+                .with_separator(SeparatorStyle::Line)
+                .with_search("filter by name / path…", accent),
+            Pod::new(MaraId::new(("usd.outliner", "scene", 1usize)))
+                .with_separator(SeparatorStyle::Line)
+                .fill()
+                .with_tree(7, move |tree| {
+                    usd_tree(tree, tree_root, accent, &filter, &nodes, &roots)
+                }),
+            Pod::new(MaraId::new(("usd.outliner", "scene", 2usize))).with_readout(
+                "selected",
+                if sel.is_empty() { "—".to_string() } else { sel },
+            ),
+        ],
+    );
+}
+
+fn usd_tree(
+    tree: &mut TreeBody,
+    root_id: MaraId,
+    accent: MaraColor32,
+    filter: &str,
+    nodes: &[UsdNode],
+    roots: &[usize],
+) {
+    let sel_key = root_id.with("selected");
+    let mut selected = tree.temp_string(sel_key).unwrap_or_default();
+    let mut clicked: Option<String> = None;
+    for &r in roots {
+        walk_usd_tree(tree, root_id, nodes, r, 0, &selected, accent, filter, &mut clicked);
+    }
+    if let Some(p) = clicked {
+        selected = p;
+        tree.set_temp_string(sel_key, selected);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn walk_usd_tree(
+    tree: &mut TreeBody,
+    root_id: MaraId,
+    nodes: &[UsdNode],
+    i: usize,
+    depth: u32,
+    selected: &str,
+    accent: MaraColor32,
+    filter: &str,
+    clicked: &mut Option<String>,
+) {
+    if !usd_tree_passes(nodes, i, filter) {
+        return;
+    }
+    let node = &nodes[i];
+    let is_branch = !node.children.is_empty();
+    let exp_key = root_id.with(("exp", node.path.as_str()));
+    let eye_key = root_id.with(("eye", node.path.as_str()));
+    let mut expanded = tree.persisted_bool(exp_key).unwrap_or(true);
+    let mut eye_on = tree.persisted_bool(eye_key).unwrap_or(true);
+    let mut slots =
+        [TreeIconSlot::new(TreeIconKind::Eye, &mut eye_on).with_tooltip("Toggle visibility")];
+    let resp = tree.row(
+        i,
+        depth,
+        if is_branch { Some(&mut expanded) } else { None },
+        Some("cube"),
+        &node.name,
+        selected == node.path,
+        accent,
+        &mut slots,
+    );
+    if resp.body.clicked {
+        *clicked = Some(node.path.clone());
+    }
+    tree.set_persisted_bool(exp_key, expanded);
+    tree.set_persisted_bool(eye_key, eye_on);
+    if is_branch && expanded {
+        for &c in &node.children {
+            walk_usd_tree(tree, root_id, nodes, c, depth + 1, selected, accent, filter, clicked);
         }
     }
+}
+
+/// A node passes when it (or any descendant) matches the lowercase `filter`.
+fn usd_tree_passes(nodes: &[UsdNode], i: usize, filter: &str) -> bool {
+    if filter.is_empty() {
+        return true;
+    }
+    let node = &nodes[i];
+    if node.name.to_lowercase().contains(filter) || node.path.to_lowercase().contains(filter) {
+        return true;
+    }
+    node.children.iter().any(|&c| usd_tree_passes(nodes, c, filter))
 }
 
 fn properties_pane(body: &mut PaneBody, stage: &Option<Stage>, selected: &Option<String>) {
