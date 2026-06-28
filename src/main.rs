@@ -115,11 +115,7 @@ impl WindowApp for UsdApp {
                     outliner_pane(body, prims, &mut **selected, accent);
                 },
             )
-            // `pane_in` puts the BUTTON in the Middle cluster so it lines up
-            // with its Middle-anchored pane (the `.pane()` shorthand would
-            // force the button to the Start cluster — see comment above).
-            .pane_in(
-                mara_core::ribbon::RibbonCluster::Middle,
+            .pane(
                 PANE_PROPERTIES,
                 "options",
                 "Properties",
@@ -182,8 +178,11 @@ fn build_usd_tree(prims: &[PrimRow]) -> (Vec<UsdNode>, Vec<usize>) {
             children: Vec::new(),
         })
         .collect();
-    let index: std::collections::HashMap<&str, usize> =
-        prims.iter().enumerate().map(|(i, p)| (p.path.as_str(), i)).collect();
+    let index: std::collections::HashMap<&str, usize> = prims
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.path.as_str(), i))
+        .collect();
     let mut roots = Vec::new();
     for (i, p) in prims.iter().enumerate() {
         let parent = &p.path[..p.path.rfind('/').unwrap_or(0)];
@@ -227,7 +226,11 @@ fn outliner_pane(
                 }),
             Pod::new(MaraId::new(("usd.outliner", "scene", 2usize))).with_readout(
                 "selected",
-                if sel.is_empty() { "—".to_string() } else { sel },
+                if sel.is_empty() {
+                    "—".to_string()
+                } else {
+                    sel
+                },
             ),
         ],
     );
@@ -245,7 +248,17 @@ fn usd_tree(
     let mut selected = tree.temp_string(sel_key).unwrap_or_default();
     let mut clicked: Option<String> = None;
     for &r in roots {
-        walk_usd_tree(tree, root_id, nodes, r, 0, &selected, accent, filter, &mut clicked);
+        walk_usd_tree(
+            tree,
+            root_id,
+            nodes,
+            r,
+            0,
+            &selected,
+            accent,
+            filter,
+            &mut clicked,
+        );
     }
     if let Some(p) = clicked {
         selected = p;
@@ -293,7 +306,17 @@ fn walk_usd_tree(
     tree.set_persisted_bool(eye_key, eye_on);
     if is_branch && expanded {
         for &c in &node.children {
-            walk_usd_tree(tree, root_id, nodes, c, depth + 1, selected, accent, filter, clicked);
+            walk_usd_tree(
+                tree,
+                root_id,
+                nodes,
+                c,
+                depth + 1,
+                selected,
+                accent,
+                filter,
+                clicked,
+            );
         }
     }
 }
@@ -307,7 +330,9 @@ fn usd_tree_passes(nodes: &[UsdNode], i: usize, filter: &str) -> bool {
     if node.name.to_lowercase().contains(filter) || node.path.to_lowercase().contains(filter) {
         return true;
     }
-    node.children.iter().any(|&c| usd_tree_passes(nodes, c, filter))
+    node.children
+        .iter()
+        .any(|&c| usd_tree_passes(nodes, c, filter))
 }
 
 fn properties_pane(body: &mut PaneBody, stage: &Option<Stage>, selected: &Option<String>) {

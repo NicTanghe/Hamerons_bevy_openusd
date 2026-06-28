@@ -3237,7 +3237,7 @@ dependencies = [
 
 [[package]]
 name = "mara"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "egui",
  "egui-wgpu",
@@ -3251,7 +3251,7 @@ dependencies = [
 
 [[package]]
 name = "mara_bevy"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "bevy",
  "crossbeam-channel",
@@ -3263,14 +3263,14 @@ dependencies = [
 
 [[package]]
 name = "mara_code"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "egui",
 ]
 
 [[package]]
 name = "mara_core"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "egui",
  "iconflow",
@@ -3281,7 +3281,7 @@ dependencies = [
 
 [[package]]
 name = "mara_graph"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "egui",
  "egui-scale",
