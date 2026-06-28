@@ -277,6 +277,40 @@ fn reconcile(world: &mut World, live: &LiveStage, map: &mut PrimEntities) {
     }
 }
 
+// ─── Authoring back (entity edit → stage) ───────────────────────────
+//
+// The write direction: an entity's `Transform` (e.g. after a gizmo drag)
+// authored back onto the prim as a single `xformOp:transform` matrix under
+// the stage's current edit target. The commit fires the sink, so the edit
+// re-projects like any other change (idempotent — the entity already holds
+// the value). Authoring one matrix op (instead of decomposed T/R/S) keeps a
+// clean round-trip with `read_transform`.
+
+/// Author `transform` onto `prim_path` as `xformOp:transform`. Errors if the
+/// path is malformed or the layer rejects the edit.
+pub fn author_transform(
+    stage: &Stage,
+    prim_path: &str,
+    transform: &Transform,
+) -> anyhow::Result<()> {
+    use openusd::sdf::Value;
+    let prim = openusd::sdf::path(prim_path)?;
+    let cols =
+        Mat4::from_scale_rotation_translation(transform.scale, transform.rotation, transform.translation)
+            .to_cols_array();
+    let m: [f64; 16] = std::array::from_fn(|i| cols[i] as f64);
+
+    let xop = prim.append_property("xformOp:transform")?;
+    stage
+        .create_attribute(xop, "matrix4d")?
+        .set(Value::Matrix4d(openusd::gf::Matrix4d(m)))?;
+    let order = prim.append_property("xformOpOrder")?;
+    stage
+        .create_attribute(order, "token[]")?
+        .set(Value::TokenVec(vec!["xformOp:transform".into()]))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,6 +442,34 @@ mod tests {
         assert!(map.entity("/World/NewChild").is_none(), "removed prim despawned");
         assert_eq!(map.len(), base);
         assert!(world.get_entity(child).is_err(), "child entity despawned");
+    }
+
+    /// The write path: authoring an entity transform back onto the prim
+    /// round-trips through `read_transform`, and fires the sink.
+    #[test]
+    fn author_transform_roundtrips_and_notifies() {
+        let stage = Stage::builder().in_memory("auth.usda").unwrap();
+        stage.define_prim("/Foo").unwrap().set_type_name("Xform").unwrap();
+        let live = LiveStage::new(stage);
+
+        let t = Transform::from_xyz(3.0, 4.0, 5.0).with_scale(Vec3::splat(2.0));
+        author_transform(&live.stage, "/Foo", &t).unwrap();
+        assert!(live.has_changes(), "authoring fires the sink");
+
+        let read = read_transform(&live.stage, &openusd::sdf::path("/Foo").unwrap())
+            .unwrap()
+            .expect("transform authored");
+        let back = to_bevy_transform(read);
+        assert!(
+            (back.translation - Vec3::new(3.0, 4.0, 5.0)).length() < 1e-4,
+            "translation round-trips, got {:?}",
+            back.translation
+        );
+        assert!(
+            (back.scale - Vec3::splat(2.0)).length() < 1e-4,
+            "scale round-trips, got {:?}",
+            back.scale
+        );
     }
 
     #[test]
