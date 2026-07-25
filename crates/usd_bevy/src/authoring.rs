@@ -77,11 +77,40 @@ pub fn clear_attribute(stage: &Stage, prim: &str, name: &str) -> Result<bool> {
     Ok(stage.remove_property(attr)?)
 }
 
+// ─── Variant selection (PLAN Phase 2) ───────────────────────────────
+
+/// Select variant `selection` for variant set `set` on `prim` (non-destructive:
+/// other sets' selections are preserved). This authors the prim's
+/// `variantSelection` metadata — a **composition** change, so the commit fires a
+/// `resynced` notice and the live loop reconciles the affected subtree.
+pub fn set_variant(stage: &Stage, prim: &str, set: &str, selection: &str) -> Result<()> {
+    let set = set.to_string();
+    let selection = selection.to_string();
+    stage
+        .prim(openusd::sdf::path(prim)?)
+        .update_metadata("variantSelection", move |cur| {
+            let mut map = match cur {
+                Some(Value::VariantSelectionMap(m)) => m,
+                _ => std::collections::HashMap::new(),
+            };
+            map.insert(set, selection);
+            Value::VariantSelectionMap(map)
+        })?;
+    Ok(())
+}
+
+/// The prim's currently authored/composed selection for `set`, if any.
+fn current_variant(stage: &Stage, prim: &str, set: &str) -> Option<String> {
+    openusd::sdf::path(prim)
+        .ok()
+        .and_then(|p| crate::read::variants::variant_selection(stage, &p, set))
+}
+
 // ─── Persistence (P6) ───────────────────────────────────────────────
 
 /// Serialize the stage's composed root layer to a `.usda` string.
 pub fn export_stage_string(stage: &Stage) -> Result<String> {
-    Ok(stage.root_layer().export_to_string()?)
+    stage.root_layer().export_to_string()
 }
 
 /// Write the stage's root layer to `filename` (a `.usda`/`.usd` path).
@@ -143,6 +172,11 @@ enum Op {
         path: String,
         new_parent: String,
     },
+    SetVariant {
+        prim: String,
+        set: String,
+        selection: Option<String>,
+    },
 }
 
 impl Op {
@@ -161,6 +195,15 @@ impl Op {
             },
             Op::RenameTo { path, new_name } => rename_prim(stage, path, new_name),
             Op::ReparentTo { path, new_parent } => reparent_prim(stage, path, new_parent),
+            Op::SetVariant {
+                prim,
+                set,
+                selection,
+            } => match selection {
+                Some(sel) => set_variant(stage, prim, set, sel),
+                // Restoring "no selection" clears the set back to its default.
+                None => set_variant(stage, prim, set, ""),
+            },
         }
     }
 }
@@ -250,6 +293,29 @@ impl EditHistory {
         let inv = Op::ReparentTo {
             path: new_path,
             new_parent: old_parent.into(),
+        };
+        self.record(stage, fwd, inv)
+    }
+
+    /// Select `selection` for variant `set` on `prim`, recording the prior
+    /// selection for undo.
+    pub fn set_variant(
+        &mut self,
+        stage: &Stage,
+        prim: &str,
+        set: &str,
+        selection: &str,
+    ) -> Result<()> {
+        let old = current_variant(stage, prim, set);
+        let fwd = Op::SetVariant {
+            prim: prim.into(),
+            set: set.into(),
+            selection: Some(selection.into()),
+        };
+        let inv = Op::SetVariant {
+            prim: prim.into(),
+            set: set.into(),
+            selection: old,
         };
         self.record(stage, fwd, inv)
     }

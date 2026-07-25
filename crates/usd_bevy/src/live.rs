@@ -46,6 +46,11 @@ impl StageChange {
 pub struct LiveStage {
     pub stage: Stage,
     queue: Rc<RefCell<Vec<StageChange>>>,
+    // Prim paths whose *next* change was caused by our own author-back and
+    // should be swallowed once (the echo guard, PLAN P2). Author-back writes
+    // the value the component already holds, so a re-project would be a no-op
+    // — but skipping it avoids redundant work and any mid-edit churn.
+    suppressed: Rc<RefCell<std::collections::HashSet<String>>>,
     // Kept so the sink lives as long as the stage; removed on drop.
     sink: Option<StageSinkId>,
 }
@@ -72,6 +77,7 @@ impl LiveStage {
         Self {
             stage,
             queue,
+            suppressed: Rc::new(RefCell::new(std::collections::HashSet::new())),
             sink: Some(sink),
         }
     }
@@ -84,6 +90,51 @@ impl LiveStage {
     /// Whether any change is pending (cheap check before doing work).
     pub fn has_changes(&self) -> bool {
         !self.queue.borrow().is_empty()
+    }
+
+    /// Mark `prim` as self-authored: the next change mentioning it (fired by
+    /// our own author-back) is swallowed by [`apply_changes`] rather than
+    /// re-projected. Call immediately before authoring.
+    pub fn mark_authored(&self, prim: impl Into<String>) {
+        self.suppressed.borrow_mut().insert(prim.into());
+    }
+
+    /// Take and clear the set of self-authored prim paths.
+    fn take_suppressed(&self) -> std::collections::HashSet<String> {
+        std::mem::take(&mut *self.suppressed.borrow_mut())
+    }
+
+    /// Load `prim`'s payload (and everything beneath it). This is a composition
+    /// change — it fires the change sink, so the next `apply_changes` reconciles
+    /// and the newly-composed subtree is projected. The reversible counterpart
+    /// of BSN's `queue_spawn_scene`.
+    pub fn load_payload(&self, prim: &str) {
+        if let Ok(p) = openusd::sdf::path(prim) {
+            self.stage
+                .load(p, openusd::usd::LoadPolicy::WithDescendants);
+            self.enqueue_resync(prim);
+        }
+    }
+
+    /// Unload `prim`'s payload — the projected subtree is despawned on the next
+    /// `apply_changes` and the prim is marked
+    /// [`UsdPayloadUnloaded`](crate::route::payload::UsdPayloadUnloaded).
+    pub fn unload_payload(&self, prim: &str) {
+        if let Ok(p) = openusd::sdf::path(prim) {
+            self.stage.unload(p);
+            self.enqueue_resync(prim);
+        }
+    }
+
+    /// Enqueue a `resynced` change for `prim`. openusd's `load`/`unload` change
+    /// composition but do **not** fire the authoring change sink (they are
+    /// stage load-rule changes, not layer-edit commits), so we synthesize the
+    /// notice ourselves — the reconcile then materializes/despawns the subtree.
+    fn enqueue_resync(&self, prim: &str) {
+        self.queue.borrow_mut().push(StageChange {
+            resynced: vec![prim.to_string()],
+            changed_info: Vec::new(),
+        });
     }
 }
 
@@ -164,8 +215,43 @@ impl PrimEntities {
 // routing (RETHINK §12) layer on top of this same shape.
 
 use crate::prim_ref::UsdPrimRef;
-use crate::read::geom::{VisibilityState, read_visibility};
 use crate::read::xform::read_transform;
+use crate::route::{SchemaRegistry, StageTime};
+
+/// Prim paths that have at least one time-sampled (animated) attribute — the
+/// set the animation resampler revisits when [`StageTime`] changes. Computed
+/// once at projection.
+#[derive(Resource, Default, Clone)]
+pub struct AnimatedPrims(pub std::collections::HashSet<String>);
+
+/// The [`DisplayPurposes`] the projected entities were last filtered against,
+/// so the purpose reprojector only reruns when the toggle actually changes.
+#[derive(Resource, Default)]
+struct AppliedPurposes(Option<crate::route::DisplayPurposes>);
+
+/// The [`StageTime`] the projected entities were last sampled at, so the
+/// resampler only reruns when the time actually moves.
+#[derive(Resource, Default)]
+struct SampledTime(Option<f64>);
+
+/// Whether `prim` animates: it has a time-sampled attribute of its own, or it
+/// is a skinned mesh driven by a time-varying SkelAnimation (whose samples live
+/// on a different prim).
+fn prim_is_animated(stage: &Stage, path: &openusd::sdf::Path) -> bool {
+    let own = stage
+        .prim(path.clone())
+        .attributes()
+        .map(|attrs| {
+            attrs.iter().any(|a| {
+                a.time_sample_times()
+                    .map(|times| !times.is_empty())
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+    own || crate::read::skel::skin_is_time_varying(stage, path)
+        || crate::read::skel::blend_is_time_varying(stage, path)
+}
 
 fn to_bevy_transform(t: crate::read::xform::Transform3) -> Transform {
     Transform {
@@ -175,68 +261,29 @@ fn to_bevy_transform(t: crate::read::xform::Transform3) -> Transform {
     }
 }
 
-fn transform_at(stage: &Stage, prim_path: &str) -> Transform {
-    openusd::sdf::path(prim_path)
-        .ok()
-        .and_then(|p| read_transform(stage, &p).ok().flatten())
-        .map(to_bevy_transform)
-        .unwrap_or_default()
-}
-
-fn visibility_at(stage: &Stage, prim_path: &str) -> Visibility {
-    match openusd::sdf::path(prim_path)
-        .ok()
-        .and_then(|p| read_visibility(stage, &p).ok())
-    {
-        Some(VisibilityState::Invisible) => Visibility::Hidden,
-        _ => Visibility::default(),
+/// Rotation mapping the stage's authored up-axis onto Bevy's Y-up world. USD
+/// defaults to Y-up; Z-up content (common for robotics / CAD assets) is rotated
+/// -90° about X so +Z becomes +Y. Applied once on the stage-root entity so the
+/// whole composed scene stands upright on the ground grid.
+fn stage_up_axis(stage: &Stage) -> Quat {
+    let is_z = matches!(
+        stage.stage_metadata("upAxis").ok().flatten(),
+        Some(openusd::sdf::Value::Token(t)) if t.as_str() == "Z"
+    );
+    if is_z {
+        Quat::from_rotation_x(-core::f32::consts::FRAC_PI_2)
+    } else {
+        Quat::IDENTITY
     }
 }
 
-/// Re-read and patch the per-prim components we project (the §12 routing
-/// target). v1: `Transform` + `Visibility`; mesh/material/light extend here.
-fn patch_prim(world: &mut World, stage: &Stage, entity: Entity, prim: &str) {
-    let t = transform_at(stage, prim);
-    if let Some(mut tr) = world.get_mut::<Transform>(entity) {
-        *tr = t;
+/// The namespace parent of a prim path — the pseudo-root `/` for a top-level
+/// prim, so it parents onto the stage-root entity.
+fn parent_path(path: &str) -> &str {
+    match path.rfind('/') {
+        Some(0) | None => "/",
+        Some(i) => &path[..i],
     }
-    let v = visibility_at(stage, prim);
-    if let Some(mut vis) = world.get_mut::<Visibility>(entity) {
-        *vis = v;
-    }
-}
-
-/// If `prim` is a mesh, build a Bevy mesh + a default material and attach
-/// `Mesh3d`/`MeshMaterial3d`. No-op when the render `Assets` aren't present
-/// (headless) or the prim has no mesh. (Real material binding lands when the
-/// material reader is ported into `live`.)
-/// Returns `true` if a `Mesh3d` was attached.
-fn attach_mesh(world: &mut World, stage: &Stage, entity: Entity, prim: &str) -> bool {
-    let Some(p) = openusd::sdf::path(prim).ok() else {
-        return false;
-    };
-    let Ok(Some(read)) = crate::read::geom::read_mesh(stage, &p) else {
-        return false;
-    };
-    if world.get_resource::<Assets<Mesh>>().is_none()
-        || world.get_resource::<Assets<StandardMaterial>>().is_none()
-    {
-        bevy::log::warn!(
-            target: "usd_bevy::live",
-            "{prim}: has a mesh but render Assets are absent — not attached"
-        );
-        return false;
-    }
-    bevy::log::trace!(target: "usd_bevy::live", "{prim}: mesh {} points -> Mesh3d", read.points.len());
-    let mesh = crate::mesh::mesh_from_usd(&read);
-    let mesh_handle = world.resource_mut::<Assets<Mesh>>().add(mesh);
-    let material = world
-        .resource_mut::<Assets<StandardMaterial>>()
-        .add(StandardMaterial::default());
-    world
-        .entity_mut(entity)
-        .insert((Mesh3d(mesh_handle), MeshMaterial3d(material)));
-    true
 }
 
 /// The prim path owning a (possibly property) path: `/Foo.bar` → `/Foo`.
@@ -244,37 +291,87 @@ fn prim_of(path: &str) -> &str {
     path.split('.').next().unwrap_or(path)
 }
 
+/// The property part of a (possibly property) path: `/Foo.xformOp:x` →
+/// `Some("xformOp:x")`; a bare prim path → `None`.
+fn property_of(path: &str) -> Option<&str> {
+    path.split_once('.').map(|(_, prop)| prop)
+}
+
+/// The traversal predicate for projection: active + defined + non-abstract, but
+/// **not** requiring `LOADED` (unlike `PrimPredicate::default()`). This projects
+/// a prim whose payload is *unloaded* as a placeholder (its payloaded children
+/// stay absent until [`LiveStage::load_payload`]). For fully-loaded stages this
+/// is identical to the default predicate.
+fn traverse_predicate() -> openusd::usd::PrimPredicate {
+    use openusd::usd::PrimStatus;
+    openusd::usd::PrimPredicate::new(
+        PrimStatus::ACTIVE.union(PrimStatus::DEFINED),
+        PrimStatus::ABSTRACT,
+    )
+}
+
+/// Snapshot the registry out of the world (Arc-cheap `Clone`), falling back to
+/// the built-in routes when none is installed — so direct `project_stage` /
+/// `apply_changes` calls in tests work without wiring a registry.
+fn registry_of(world: &World) -> SchemaRegistry {
+    world
+        .get_resource::<SchemaRegistry>()
+        .cloned()
+        .unwrap_or_else(SchemaRegistry::builtin)
+}
+
 /// Project every prim in the stage into an entity (`UsdPrimRef` +
 /// `Transform`), recording the path↔entity bimap. Idempotent only on an
 /// empty world — call once on load.
 pub fn project_stage(world: &mut World, live: &LiveStage, map: &mut PrimEntities) {
     let stage = &live.stage;
+    let registry = registry_of(world);
+    // The stage-root entity (the pseudo-root `/`) carries the up-axis rotation;
+    // every top-level prim hangs off it, so Bevy's transform propagation
+    // composes prim-local transforms into correct world transforms and the
+    // whole scene stands upright on the grid. It is not a real prim, so no
+    // routes run on it (they would clobber the up-axis rotation).
+    let root = world
+        .spawn((
+            UsdPrimRef {
+                path: "/".to_string(),
+            },
+            Transform::from_rotation(stage_up_axis(stage)),
+            Visibility::default(),
+        ))
+        .id();
+    map.insert("/", root);
+
     let mut prim_count = 0usize;
-    let mut mesh_count = 0usize;
+    let mut animated: std::collections::HashSet<String> = std::collections::HashSet::new();
     let _ = stage.traverse(
-        openusd::usd::PrimPredicate::default(),
+        traverse_predicate(),
         |path: &openusd::sdf::Path| {
+            // Traversal is pre-order, so the parent prim's entity already exists.
+            let parent = map.entity(parent_path(path.as_str())).unwrap_or(root);
             let entity = world
                 .spawn((
                     UsdPrimRef {
                         path: path.as_str().to_string(),
-                        ..Default::default()
                     },
-                    transform_at(stage, path.as_str()),
-                    visibility_at(stage, path.as_str()),
+                    ChildOf(parent),
                 ))
                 .id();
             map.insert(path.as_str().to_string(), entity);
             prim_count += 1;
-            if attach_mesh(world, stage, entity, path.as_str()) {
-                mesh_count += 1;
+            if prim_is_animated(stage, path) {
+                animated.insert(path.as_str().to_string());
             }
+            // Every prim→component mapping goes through the registry.
+            registry.project_prim(stage, path, world, entity);
         },
     );
     bevy::log::info!(
         target: "usd_bevy::live",
-        "projected {prim_count} prims, {mesh_count} meshes"
+        "projected {prim_count} prims ({} animated)",
+        animated.len()
     );
+    world.insert_resource(AnimatedPrims(animated));
     // Projecting authored the initial read; clear so the first sync starts clean.
     let _ = live.drain_changes();
 }
@@ -295,13 +392,33 @@ pub fn apply_changes(world: &mut World, live: &LiveStage, map: &mut PrimEntities
         reconcile(world, live, map);
         return;
     }
+    // `changed_info` only: group the changed *property* paths by owning prim so
+    // each route sees exactly which properties changed and can patch sparsely.
+    let registry = registry_of(world);
+    // Echo guard: prims we just authored ourselves are swallowed this round.
+    let suppressed = live.take_suppressed();
+    let mut by_prim: HashMap<String, Vec<String>> = HashMap::new();
     for change in &changes {
         for path in change.paths() {
-            let prim = prim_of(path);
-            if let Some(entity) = map.entity(prim) {
-                patch_prim(world, &live.stage, entity, prim);
+            let prim = prim_of(path).to_string();
+            let entry = by_prim.entry(prim).or_default();
+            if let Some(prop) = property_of(path) {
+                entry.push(prop.to_string());
             }
         }
+    }
+    for (prim, props) in by_prim {
+        if suppressed.contains(&prim) {
+            continue;
+        }
+        let Some(entity) = map.entity(&prim) else {
+            continue;
+        };
+        let Ok(p) = openusd::sdf::path(&prim) else {
+            continue;
+        };
+        let prop_refs: Vec<&str> = props.iter().map(String::as_str).collect();
+        registry.patch_prim(&live.stage, &p, world, entity, &prop_refs);
     }
 }
 
@@ -310,18 +427,19 @@ pub fn apply_changes(world: &mut World, live: &LiveStage, map: &mut PrimEntities
 /// patch transforms on the rest.
 fn reconcile(world: &mut World, live: &LiveStage, map: &mut PrimEntities) {
     let stage = &live.stage;
+    let registry = registry_of(world);
     let mut current: std::collections::HashSet<String> = std::collections::HashSet::new();
     let _ = stage.traverse(
-        openusd::usd::PrimPredicate::default(),
+        traverse_predicate(),
         |p: &openusd::sdf::Path| {
             current.insert(p.as_str().to_string());
         },
     );
 
-    // Despawn entities for prims no longer present.
+    // Despawn entities for prims no longer present (never the `/` stage root).
     let stale: Vec<(String, Entity)> = map
         .iter()
-        .filter(|(p, _)| !current.contains(*p))
+        .filter(|(p, _)| *p != "/" && !current.contains(*p))
         .map(|(p, e)| (p.to_string(), e))
         .collect();
     for (path, entity) in stale {
@@ -329,25 +447,38 @@ fn reconcile(world: &mut World, live: &LiveStage, map: &mut PrimEntities) {
         map.remove_path(&path);
     }
 
-    // Spawn new prims; patch components on existing ones.
-    for path in &current {
+    // Spawn new prims (shallowest first, so a child finds its parent) and
+    // reapply routes on existing ones. Both go through the registry: new prims
+    // get a full `project_prim`; existing prims get a full re-patch (empty
+    // `changed` = "reapply everything", the conservative choice on a resync).
+    let root = map.entity("/");
+    let mut ordered: Vec<&String> = current.iter().collect();
+    ordered.sort_by_key(|p| p.matches('/').count());
+    let mut animated: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for path in ordered {
+        let Ok(p) = openusd::sdf::path(path) else {
+            continue;
+        };
+        if prim_is_animated(stage, &p) {
+            animated.insert(path.clone());
+        }
         if let Some(entity) = map.entity(path) {
-            patch_prim(world, stage, entity, path);
+            registry.patch_prim(stage, &p, world, entity, &[]);
         } else {
-            let entity = world
-                .spawn((
-                    UsdPrimRef {
-                        path: path.clone(),
-                        ..Default::default()
-                    },
-                    transform_at(stage, path),
-                    visibility_at(stage, path),
-                ))
-                .id();
+            let parent = map.entity(parent_path(path)).or(root);
+            let mut e = world.spawn(UsdPrimRef {
+                path: path.clone(),
+            });
+            if let Some(parent) = parent {
+                e.insert(ChildOf(parent));
+            }
+            let entity = e.id();
             map.insert(path.clone(), entity);
-            attach_mesh(world, stage, entity, path);
+            registry.project_prim(stage, &p, world, entity);
         }
     }
+    // Refresh the animated set for the reconciled prim set.
+    world.insert_resource(AnimatedPrims(animated));
 }
 
 // ─── Bevy plugin + systems ──────────────────────────────────────────
@@ -368,7 +499,25 @@ pub struct LiveStagePlugin;
 impl Plugin for LiveStagePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PrimEntities>()
-            .add_systems(Update, (project_on_load_system, reproject_system).chain());
+            .init_resource::<StageTime>()
+            .init_resource::<AnimatedPrims>()
+            .init_resource::<SampledTime>()
+            .init_resource::<crate::route::DisplayPurposes>()
+            .init_resource::<AppliedPurposes>()
+            .add_systems(
+                Update,
+                (
+                    project_on_load_system,
+                    reproject_system,
+                    resample_animation_system,
+                    apply_display_purposes_system,
+                )
+                    .chain(),
+            );
+        // Ensure the routing registry exists even if `UsdPlugin` wasn't added.
+        if !app.world().contains_resource::<SchemaRegistry>() {
+            app.insert_resource(SchemaRegistry::builtin());
+        }
     }
 }
 
@@ -378,7 +527,7 @@ fn project_on_load_system(world: &mut World) {
         return;
     }
     // Only project once per session: skip if the bimap is already populated.
-    if world.resource::<PrimEntities>().len() > 0 {
+    if !world.resource::<PrimEntities>().is_empty() {
         return;
     }
     let Some(live) = world.remove_non_send::<LiveStage>() else {
@@ -388,6 +537,78 @@ fn project_on_load_system(world: &mut World) {
     project_stage(world, &live, &mut map);
     world.insert_resource(map);
     world.insert_non_send(live);
+}
+
+/// Resample animated prims when [`StageTime`] moves. Only revisits the prims
+/// that actually carry time samples ([`AnimatedPrims`]), re-patching them at
+/// the new time (the routes read `StageTime` when resolving values).
+fn resample_animation_system(world: &mut World) {
+    if world.get_non_send::<LiveStage>().is_none() {
+        return;
+    }
+    let current = world.get_resource::<StageTime>().map(|t| t.current);
+    let last = world.get_resource::<SampledTime>().and_then(|t| t.0);
+    if current == last {
+        return; // time hasn't moved
+    }
+    let animated = world.get_resource::<AnimatedPrims>().cloned().unwrap_or_default();
+    if animated.0.is_empty() {
+        // Nothing animated; still record the time so we don't re-check.
+        if let Some(mut sampled) = world.get_resource_mut::<SampledTime>() {
+            sampled.0 = current;
+        }
+        return;
+    }
+    let Some(live) = world.remove_non_send::<LiveStage>() else {
+        return;
+    };
+    let map = world.remove_resource::<PrimEntities>().unwrap_or_default();
+    let registry = registry_of(world);
+    for path in &animated.0 {
+        if let Some(entity) = map.entity(path)
+            && let Ok(p) = openusd::sdf::path(path)
+        {
+            // patch_prim resolves values at the world's StageTime.
+            registry.patch_prim(&live.stage, &p, world, entity, &[]);
+        }
+    }
+    world.insert_resource(map);
+    world.insert_non_send(live);
+    if let Some(mut sampled) = world.get_resource_mut::<SampledTime>() {
+        sampled.0 = current;
+    }
+}
+
+/// Re-filter every prim's visibility when [`DisplayPurposes`] changes (a
+/// viewport toggling proxy↔render, or revealing guides). Purpose is inherited,
+/// so a toggle can flip any prim — re-patch them all with a synthetic `purpose`
+/// change; routes that don't own `purpose` ignore it.
+fn apply_display_purposes_system(world: &mut World) {
+    if world.get_non_send::<LiveStage>().is_none() {
+        return;
+    }
+    let current = world.get_resource::<crate::route::DisplayPurposes>().copied();
+    let last = world.get_resource::<AppliedPurposes>().and_then(|a| a.0);
+    if current == last {
+        return; // toggle hasn't moved
+    }
+    let Some(live) = world.remove_non_send::<LiveStage>() else {
+        return;
+    };
+    let map = world.remove_resource::<PrimEntities>().unwrap_or_default();
+    let registry = registry_of(world);
+    let entries: Vec<(String, Entity)> =
+        map.iter().map(|(p, e)| (p.to_string(), e)).collect();
+    for (path, entity) in entries {
+        if let Ok(p) = openusd::sdf::path(&path) {
+            registry.patch_prim(&live.stage, &p, world, entity, &["purpose"]);
+        }
+    }
+    world.insert_resource(map);
+    world.insert_non_send(live);
+    if let Some(mut applied) = world.get_resource_mut::<AppliedPurposes>() {
+        applied.0 = current;
+    }
 }
 
 /// Drain the live stage's change queue and reproject affected entities.
@@ -524,8 +745,6 @@ impl TransformHistory {
 mod tests {
     use super::*;
 
-
-
     /// Kitchen_set.usdz's root layer is `Kitchen_set.usd`, so this exercises
     /// the openusd USDZ `.usd`-layer content-sniff fix (without it the stage
     /// won't even open). NOTE: its geometry is behind references to other
@@ -533,20 +752,29 @@ mod tests {
     /// composed stage is structure-only (0 meshes). See OPENUSD_ISSUE.md.
     #[test]
     fn loads_kitchen_usdz() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/external/Kitchen_set.usdz");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/external/Kitchen_set.usdz"
+        );
         let stage = Stage::open(path).expect("Kitchen_set.usdz should open");
         let mut meshes = 0usize;
-        let _ = stage.traverse(openusd::usd::PrimPredicate::default(), |p: &openusd::sdf::Path| {
-            if let Ok(Some(m)) = crate::read::geom::read_mesh(&stage, p) {
-                if !m.points.is_empty() {
+        let _ = stage.traverse(
+            openusd::usd::PrimPredicate::default(),
+            |p: &openusd::sdf::Path| {
+                if let Ok(Some(m)) = crate::read::geom::read_mesh(&stage, p)
+                    && !m.points.is_empty()
+                {
                     meshes += 1;
                 }
-            }
-        });
+            },
+        );
         // Kitchen's geometry is behind references to other files *inside* the
         // usdz; this asserts the openusd package-resolution fix resolves them.
         println!("KITCHEN meshes: {meshes}");
-        assert!(meshes > 1000, "kitchen packaged meshes should resolve, got {meshes}");
+        assert!(
+            meshes > 1000,
+            "kitchen packaged meshes should resolve, got {meshes}"
+        );
     }
     use openusd::sdf::Value;
 
@@ -889,6 +1117,884 @@ mod tests {
             mesh_count > 0,
             "at least one mesh prim should project a Mesh3d"
         );
+    }
+
+    // ─── Reflect route (PLAN P1.3): arbitrary components from USD ────────
+
+    use bevy::ecs::reflect::AppTypeRegistry;
+    use bevy::reflect::TypeRegistry;
+
+    #[derive(Component, Reflect, Default, Debug, Clone, PartialEq)]
+    #[reflect(Component, Default)]
+    struct Health {
+        current: f64,
+        max: f64,
+    }
+
+    #[derive(Component, Reflect, Default, Debug, Clone, PartialEq)]
+    #[reflect(Component, Default)]
+    struct Boss {
+        enraged: bool,
+        rage: f32,
+    }
+
+    #[derive(Reflect, Default, Debug, Clone, PartialEq)]
+    enum MotionState {
+        #[default]
+        Idle,
+        Moving(f32),
+        Warp { x: i32, y: i32 },
+    }
+
+    #[derive(Component, Reflect, Default, Debug, Clone, PartialEq)]
+    #[reflect(Component, Default)]
+    struct Motion {
+        state: MotionState,
+    }
+
+    /// A `World` with an `AppTypeRegistry` (populated by `register`) and the
+    /// built-in `SchemaRegistry`, ready for `project_stage`.
+    fn reflect_world(register: impl FnOnce(&mut TypeRegistry)) -> World {
+        let mut world = World::new();
+        let type_registry = AppTypeRegistry::default();
+        register(&mut type_registry.write());
+        world.insert_resource(type_registry);
+        world.insert_resource(SchemaRegistry::builtin());
+        world
+    }
+
+    fn author_double(stage: &Stage, attr: &str, v: f64) {
+        stage
+            .create_attribute(attr, "double")
+            .unwrap()
+            .set(Value::Double(v))
+            .unwrap();
+    }
+
+    /// Project a prim carrying `bevy:` attributes → the reflect route builds
+    /// and populates the matching component. This is the importer→scene-system
+    /// line: an arbitrary gameplay component authored purely in USD.
+    #[test]
+    fn reflect_route_projects_component() {
+        let stage = Stage::builder().in_memory("reflect.usda").unwrap();
+        stage
+            .define_prim("/Enemy")
+            .unwrap()
+            .set_type_name("Xform")
+            .unwrap();
+        author_double(&stage, "/Enemy.bevy:Health:current", 50.0);
+        author_double(&stage, "/Enemy.bevy:Health:max", 100.0);
+
+        let live = LiveStage::new(stage);
+        let mut world = reflect_world(|r| r.register::<Health>());
+        let mut map = PrimEntities::default();
+        project_stage(&mut world, &live, &mut map);
+
+        let e = map.entity("/Enemy").unwrap();
+        assert_eq!(
+            world.get::<Health>(e),
+            Some(&Health {
+                current: 50.0,
+                max: 100.0
+            }),
+            "both authored fields projected onto the component"
+        );
+    }
+
+    /// A data-carrying enum field (PLAN 4c): a token selects the variant and
+    /// sibling `:_0` / `:name` attributes fill its tuple / struct payload.
+    #[test]
+    fn reflect_route_data_enum_variants() {
+        let stage = Stage::builder().in_memory("enum.usda").unwrap();
+        stage.define_prim("/Mover").unwrap().set_type_name("Xform").unwrap();
+        stage.define_prim("/Warper").unwrap().set_type_name("Xform").unwrap();
+        // Tuple variant `Moving(f32)`.
+        stage
+            .create_attribute("/Mover.bevy:Motion:state", "token")
+            .unwrap()
+            .set(Value::Token("Moving".into()))
+            .unwrap();
+        stage
+            .create_attribute("/Mover.bevy:Motion:state:_0", "float")
+            .unwrap()
+            .set(Value::Float(5.0))
+            .unwrap();
+        // Struct variant `Warp { x, y }`.
+        stage
+            .create_attribute("/Warper.bevy:Motion:state", "token")
+            .unwrap()
+            .set(Value::Token("Warp".into()))
+            .unwrap();
+        stage
+            .create_attribute("/Warper.bevy:Motion:state:x", "int")
+            .unwrap()
+            .set(Value::Int(3))
+            .unwrap();
+        stage
+            .create_attribute("/Warper.bevy:Motion:state:y", "int")
+            .unwrap()
+            .set(Value::Int(7))
+            .unwrap();
+
+        let live = LiveStage::new(stage);
+        let mut world = reflect_world(|r| r.register::<Motion>());
+        let mut map = PrimEntities::default();
+        project_stage(&mut world, &live, &mut map);
+
+        assert_eq!(
+            world.get::<Motion>(map.entity("/Mover").unwrap()).unwrap().state,
+            MotionState::Moving(5.0),
+            "tuple-variant payload authored from :_0"
+        );
+        assert_eq!(
+            world.get::<Motion>(map.entity("/Warper").unwrap()).unwrap().state,
+            MotionState::Warp { x: 3, y: 7 },
+            "struct-variant payload authored from :x/:y"
+        );
+    }
+
+    /// A `changed_info` edit to one `bevy:` field patches *only* that field —
+    /// BSN's `TemplatePatch` semantics, driven by USD. The untouched field
+    /// keeps its value.
+    #[test]
+    fn reflect_route_sparse_patch() {
+        let stage = Stage::builder().in_memory("sparse.usda").unwrap();
+        stage.define_prim("/Enemy").unwrap();
+        author_double(&stage, "/Enemy.bevy:Health:current", 50.0);
+        author_double(&stage, "/Enemy.bevy:Health:max", 100.0);
+
+        let live = LiveStage::new(stage);
+        let mut world = reflect_world(|r| r.register::<Health>());
+        let mut map = PrimEntities::default();
+        project_stage(&mut world, &live, &mut map);
+        let e = map.entity("/Enemy").unwrap();
+
+        // Change only `max`.
+        live.stage
+            .attribute("/Enemy.bevy:Health:max")
+            .set(Value::Double(250.0))
+            .unwrap();
+        apply_changes(&mut world, &live, &mut map);
+
+        assert_eq!(
+            world.get::<Health>(e),
+            Some(&Health {
+                current: 50.0,
+                max: 250.0
+            }),
+            "only `max` changed; `current` untouched"
+        );
+    }
+
+    /// Clearing an authored opinion reverts that field to the type default;
+    /// clearing every `bevy:` opinion of a type removes the component.
+    #[test]
+    fn reflect_route_clear_reverts_and_removes() {
+        let stage = Stage::builder().in_memory("clear.usda").unwrap();
+        stage.define_prim("/Enemy").unwrap();
+        author_double(&stage, "/Enemy.bevy:Health:current", 50.0);
+        author_double(&stage, "/Enemy.bevy:Health:max", 100.0);
+
+        let live = LiveStage::new(stage);
+        let mut world = reflect_world(|r| r.register::<Health>());
+        let mut map = PrimEntities::default();
+        project_stage(&mut world, &live, &mut map);
+        let e = map.entity("/Enemy").unwrap();
+
+        // Clear just `max` → reverts to Health::default().max (0.0).
+        live.stage
+            .remove_property(openusd::sdf::path("/Enemy.bevy:Health:max").unwrap())
+            .unwrap();
+        apply_changes(&mut world, &live, &mut map);
+        assert_eq!(
+            world.get::<Health>(e),
+            Some(&Health {
+                current: 50.0,
+                max: 0.0
+            }),
+            "cleared `max` reverts to default; `current` stays"
+        );
+
+        // Clear the last opinion → component removed.
+        live.stage
+            .remove_property(openusd::sdf::path("/Enemy.bevy:Health:current").unwrap())
+            .unwrap();
+        apply_changes(&mut world, &live, &mut map);
+        assert!(
+            world.get::<Health>(e).is_none(),
+            "clearing the last bevy: opinion removes the component"
+        );
+    }
+
+    /// A `Handle<T>` reflect field resolves an asset-path value through the
+    /// `AssetServer` at project time (PLAN 4a — the `HandleTemplate` analog).
+    #[test]
+    fn reflect_handle_field_loads_asset() {
+        #[derive(Component, Reflect, Default)]
+        #[reflect(Component, Default)]
+        struct Icon {
+            image: Handle<Image>,
+        }
+
+        let stage = Stage::builder().in_memory("handle.usda").unwrap();
+        stage.define_prim("/I").unwrap();
+        stage
+            .create_attribute("/I.bevy:Icon:image", "asset")
+            .unwrap()
+            .set(Value::String("textures/icon.png".into()))
+            .unwrap();
+        let live = LiveStage::new(stage);
+
+        let mut app = App::new();
+        app.add_plugins((
+            bevy::app::TaskPoolPlugin::default(),
+            bevy::asset::AssetPlugin::default(),
+        ));
+        app.init_asset::<Image>();
+        app.world_mut().insert_resource(SchemaRegistry::builtin());
+        {
+            let reg = app.world().resource::<AppTypeRegistry>().clone();
+            reg.write().register::<Icon>();
+        }
+        let mut map = PrimEntities::default();
+        project_stage(app.world_mut(), &live, &mut map);
+
+        let e = map.entity("/I").unwrap();
+        let handle = app.world().get::<Icon>(e).expect("Icon component").image.clone();
+        assert!(
+            handle.path().is_some(),
+            "Handle<Image> field resolved an asset path via the AssetServer"
+        );
+        assert_eq!(
+            handle.path().unwrap().path().to_str(),
+            Some("textures/icon.png"),
+        );
+    }
+
+    /// Nested field paths descend struct fields (`bevy:Boss:rage`), and a
+    /// second component on the same prim projects independently.
+    #[test]
+    fn reflect_route_multiple_components() {
+        let stage = Stage::builder().in_memory("multi.usda").unwrap();
+        stage.define_prim("/Enemy").unwrap();
+        author_double(&stage, "/Enemy.bevy:Health:max", 100.0);
+        stage
+            .create_attribute("/Enemy.bevy:Boss:enraged", "bool")
+            .unwrap()
+            .set(Value::Bool(true))
+            .unwrap();
+        stage
+            .create_attribute("/Enemy.bevy:Boss:rage", "float")
+            .unwrap()
+            .set(Value::Float(0.75))
+            .unwrap();
+
+        let live = LiveStage::new(stage);
+        let mut world = reflect_world(|r| {
+            r.register::<Health>();
+            r.register::<Boss>();
+        });
+        let mut map = PrimEntities::default();
+        project_stage(&mut world, &live, &mut map);
+        let e = map.entity("/Enemy").unwrap();
+
+        assert_eq!(world.get::<Health>(e).unwrap().max, 100.0);
+        assert_eq!(
+            world.get::<Boss>(e),
+            Some(&Boss {
+                enraged: true,
+                rage: 0.75
+            })
+        );
+    }
+
+    /// Composition-proof: a stronger opinion in the session layer wins over the
+    /// root layer, and it's the *composed* (LIVERPS-resolved) value that lands
+    /// on the component. This is USD standing in for BSN's `ResolvedScene`.
+    #[test]
+    fn reflect_route_stronger_layer_wins() {
+        // Root layer authors `max = 100`; a session layer (stronger) overrides
+        // it with `250`. Opening them composes to 250 — and *that* composed
+        // value is what the reflect route projects.
+        let root = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/reflect_compose_root.usda"
+        );
+        let session = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/reflect_compose_session.usda"
+        );
+        let stage = Stage::builder()
+            .session_layer(session)
+            .open(root)
+            .expect("open root + session");
+
+        let live = LiveStage::new(stage);
+        let mut world = reflect_world(|r| r.register::<Health>());
+        let mut map = PrimEntities::default();
+        project_stage(&mut world, &live, &mut map);
+        let e = map.entity("/Enemy").unwrap();
+
+        assert_eq!(
+            world.get::<Health>(e).unwrap().max,
+            250.0,
+            "the session-layer opinion (stronger) is what USD composed and projected"
+        );
+    }
+
+    /// A full Rust type path (encoded with `__` for `::`, the path-legal form)
+    /// resolves via the reflect route's short→full fallback — the escape hatch
+    /// for short-name collisions.
+    #[test]
+    fn reflect_full_type_path_disambiguates() {
+        // e.g. usd_bevy::live::tests::Health → usd_bevy__live__tests__Health
+        let tp = std::any::type_name::<Health>().replace("::", "__");
+        let stage = Stage::builder().in_memory("fullpath.usda").unwrap();
+        stage.define_prim("/E").unwrap();
+        author_double(&stage, &format!("/E.bevy:{tp}:max"), 50.0);
+
+        let live = LiveStage::new(stage);
+        let mut world = reflect_world(|r| r.register::<Health>());
+        let mut map = PrimEntities::default();
+        project_stage(&mut world, &live, &mut map);
+
+        let e = map.entity("/E").unwrap();
+        assert_eq!(
+            world.get::<Health>(e).map(|h| h.max),
+            Some(50.0),
+            "component authored via full type path projected"
+        );
+    }
+
+    /// A `resynced` reconcile (triggered by a sibling prim appearing) must not
+    /// drop reflect-routed components on the *existing* entities — reconcile
+    /// re-applies routes on the survivors.
+    #[test]
+    fn resync_preserves_reflect_components() {
+        let stage = Stage::builder().in_memory("resync_reflect.usda").unwrap();
+        stage.define_prim("/Enemy").unwrap();
+        author_double(&stage, "/Enemy.bevy:Health:max", 100.0);
+        let live = LiveStage::new(stage);
+        let mut world = reflect_world(|r| r.register::<Health>());
+        let mut map = PrimEntities::default();
+        project_stage(&mut world, &live, &mut map);
+        let enemy = map.entity("/Enemy").unwrap();
+        assert_eq!(world.get::<Health>(enemy).unwrap().max, 100.0);
+
+        // Defining a new prim resyncs → reconcile runs over the whole stage.
+        live.stage.define_prim("/Other").unwrap();
+        apply_changes(&mut world, &live, &mut map);
+
+        assert!(map.entity("/Other").is_some(), "new prim spawned");
+        assert_eq!(
+            world.get::<Health>(enemy).map(|h| h.max),
+            Some(100.0),
+            "existing prim's reflect component survived the reconcile"
+        );
+    }
+
+    /// A custom app-registered route runs on project, patch, and reconcile —
+    /// the extension point apps use for their own schemas.
+    #[test]
+    fn custom_route_runs_on_all_paths() {
+        #[derive(Component, Default)]
+        struct Tagged(u32);
+
+        struct TagRoute;
+        impl crate::route::PrimRoute for TagRoute {
+            fn matches(&self, ctx: &crate::route::RouteCtx) -> bool {
+                ctx.type_name.as_deref() == Some("Xform")
+            }
+            fn project(&self, _c: &crate::route::RouteCtx, world: &mut World, e: Entity) {
+                if let Ok(mut ent) = world.get_entity_mut(e) {
+                    ent.insert(Tagged(1));
+                }
+            }
+            fn patch(
+                &self,
+                _c: &crate::route::RouteCtx,
+                world: &mut World,
+                e: Entity,
+                _changed: &[&str],
+            ) {
+                if let Some(mut t) = world.get_mut::<Tagged>(e) {
+                    t.0 += 1;
+                }
+            }
+        }
+
+        let stage = Stage::builder().in_memory("custom.usda").unwrap();
+        stage
+            .define_prim("/A")
+            .unwrap()
+            .set_type_name("Xform")
+            .unwrap();
+        let live = LiveStage::new(stage);
+
+        let mut world = World::new();
+        let mut registry = SchemaRegistry::builtin();
+        registry.register(TagRoute);
+        world.insert_resource(registry);
+        let mut map = PrimEntities::default();
+        project_stage(&mut world, &live, &mut map);
+        let a = map.entity("/A").unwrap();
+        assert_eq!(world.get::<Tagged>(a).map(|t| t.0), Some(1), "project ran");
+
+        // A changed_info edit → patch.
+        author_double(&live.stage, "/A.foo", 1.0);
+        apply_changes(&mut world, &live, &mut map);
+        assert_eq!(world.get::<Tagged>(a).map(|t| t.0), Some(2), "patch ran");
+
+        // A resync (new sibling prim) → reconcile re-patches existing /A.
+        live.stage
+            .define_prim("/B")
+            .unwrap()
+            .set_type_name("Xform")
+            .unwrap();
+        apply_changes(&mut world, &live, &mut map);
+        assert_eq!(
+            world.get::<Tagged>(a).map(|t| t.0),
+            Some(3),
+            "reconcile re-patched existing prim"
+        );
+        assert_eq!(
+            world.get::<Tagged>(map.entity("/B").unwrap()).map(|t| t.0),
+            Some(1),
+            "reconcile projected the new prim"
+        );
+    }
+
+    /// The `usd!` macro (PLAN P3): an inline, compile-time-validated usda
+    /// snippet with `${expr}` interpolation opens as a stage and projects
+    /// through the routing registry — including a `bevy:` component.
+    #[test]
+    fn usd_macro_snippet_projects() {
+        let hp = 175.0_f64;
+        let name = "Goblin";
+        let snippet = crate::usd!(
+            "#usda 1.0\n\
+             def Xform \"${name}\"\n\
+             {\n\
+                 custom double bevy:Health:max = ${hp}\n\
+             }\n"
+        );
+        assert!(snippet.text().contains("Goblin"), "interpolated name");
+        assert!(snippet.text().contains("175"), "interpolated hp");
+
+        let stage = snippet.open_stage().expect("snippet opens as a stage");
+        let live = LiveStage::new(stage);
+        let mut world = reflect_world(|r| r.register::<Health>());
+        let mut map = PrimEntities::default();
+        project_stage(&mut world, &live, &mut map);
+
+        let e = map.entity("/Goblin").expect("interpolated prim projected");
+        assert_eq!(
+            world.get::<Health>(e).unwrap().max,
+            175.0,
+            "the bevy: component from the inline snippet projected"
+        );
+    }
+
+    /// The echo guard (PLAN P2): a prim marked as self-authored is skipped by
+    /// the *next* `apply_changes`, so author-back doesn't drive a reprojection
+    /// of the entity we just wrote.
+    #[test]
+    fn author_back_is_echo_suppressed() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        #[derive(Component, Default)]
+        struct Touches(usize);
+
+        struct CountRoute(Arc<AtomicUsize>);
+        impl crate::route::PrimRoute for CountRoute {
+            fn matches(&self, _c: &crate::route::RouteCtx) -> bool {
+                true
+            }
+            fn project(&self, _c: &crate::route::RouteCtx, world: &mut World, e: Entity) {
+                if let Ok(mut ent) = world.get_entity_mut(e) {
+                    ent.insert(Touches(0));
+                }
+            }
+            fn patch(
+                &self,
+                _c: &crate::route::RouteCtx,
+                world: &mut World,
+                e: Entity,
+                _changed: &[&str],
+            ) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                if let Some(mut t) = world.get_mut::<Touches>(e) {
+                    t.0 += 1;
+                }
+            }
+        }
+
+        let stage = Stage::builder().in_memory("echo.usda").unwrap();
+        stage.define_prim("/A").unwrap();
+        let live = LiveStage::new(stage);
+
+        let patches = Arc::new(AtomicUsize::new(0));
+        let mut world = World::new();
+        let mut registry = SchemaRegistry::builtin();
+        registry.register(CountRoute(patches.clone()));
+        world.insert_resource(registry);
+        let mut map = PrimEntities::default();
+        project_stage(&mut world, &live, &mut map);
+
+        // Author onto /A but mark it self-authored → the resulting change is
+        // swallowed, so the route's patch does NOT run for /A.
+        live.mark_authored("/A");
+        author_double(&live.stage, "/A.some", 1.0);
+        apply_changes(&mut world, &live, &mut map);
+        assert_eq!(
+            patches.load(Ordering::SeqCst),
+            0,
+            "self-authored change was suppressed (no patch)"
+        );
+
+        // A subsequent, un-marked change is patched normally (guard is one-shot).
+        author_double(&live.stage, "/A.some", 2.0);
+        apply_changes(&mut world, &live, &mut map);
+        assert_eq!(
+            patches.load(Ordering::SeqCst),
+            1,
+            "the next unmarked change patches normally"
+        );
+    }
+
+    /// The material route (PLAN P4): a mesh bound to a UsdPreviewSurface
+    /// projects a `StandardMaterial` with the authored colour/roughness/metallic
+    /// — replacing the mesh route's grey placeholder.
+    #[test]
+    fn project_material_binding() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/material_test.usda");
+        let stage = Stage::open(path).expect("open material_test.usda");
+        let live = LiveStage::new(stage);
+        let mut world = World::new();
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(Assets::<StandardMaterial>::default());
+        let mut map = PrimEntities::default();
+        project_stage(&mut world, &live, &mut map);
+
+        let tri = map.entity("/World/Tri").expect("mesh prim projected");
+        let handle = world
+            .get::<MeshMaterial3d<StandardMaterial>>(tri)
+            .expect("material attached")
+            .0
+            .clone();
+        let mats = world.resource::<Assets<StandardMaterial>>();
+        let m = mats.get(&handle).expect("material asset present");
+
+        let c = m.base_color.to_srgba();
+        assert!(
+            (c.red - 0.8).abs() < 1e-3 && (c.green - 0.1).abs() < 1e-3 && (c.blue - 0.1).abs() < 1e-3,
+            "authored diffuseColor projected to base_color, got {c:?}"
+        );
+        assert!(
+            (m.perceptual_roughness - 0.25).abs() < 1e-4,
+            "roughness projected, got {}",
+            m.perceptual_roughness
+        );
+        assert!(
+            (m.metallic - 0.9).abs() < 1e-4,
+            "metallic projected, got {}",
+            m.metallic
+        );
+    }
+
+    // ─── Time-sample animation (PLAN in-repo) ───────────────────────────
+
+    use openusd::usd::TimeCode;
+
+    /// Author a prim with an animated `xformOp:translate` (samples at t=0 and
+    /// t=10), returning the stage.
+    fn animated_translate_stage() -> Stage {
+        let stage = Stage::builder().in_memory("anim.usda").unwrap();
+        stage
+            .define_prim("/Mover")
+            .unwrap()
+            .set_type_name("Xform")
+            .unwrap();
+        let attr = stage
+            .create_attribute("/Mover.xformOp:translate", "double3")
+            .unwrap();
+        attr.set_at(
+            Value::Vec3d(openusd::gf::Vec3d::from([0.0, 0.0, 0.0])),
+            TimeCode::new(0.0),
+        )
+        .unwrap()
+        .set_at(
+            Value::Vec3d(openusd::gf::Vec3d::from([10.0, 0.0, 0.0])),
+            TimeCode::new(10.0),
+        )
+        .unwrap();
+        stage
+            .create_attribute("/Mover.xformOpOrder", "token[]")
+            .unwrap()
+            .set(Value::TokenVec(vec!["xformOp:translate".into()]))
+            .unwrap();
+        stage
+    }
+
+    /// Projection resolves animated transforms at the world's `StageTime`, and
+    /// re-patching after moving the time samples the new frame.
+    #[test]
+    fn animated_transform_follows_stage_time() {
+        let live = LiveStage::new(animated_translate_stage());
+        let mut world = World::new();
+        world.insert_resource(StageTime { current: 0.0 });
+        let mut map = PrimEntities::default();
+        project_stage(&mut world, &live, &mut map);
+        let mover = map.entity("/Mover").unwrap();
+        assert_eq!(
+            world.get::<Transform>(mover).unwrap().translation,
+            Vec3::new(0.0, 0.0, 0.0),
+            "projected at t=0"
+        );
+
+        // The prim is flagged as animated.
+        assert!(
+            world.resource::<AnimatedPrims>().0.contains("/Mover"),
+            "animated prim detected"
+        );
+
+        // Move time and re-patch → samples t=10.
+        world.resource_mut::<StageTime>().current = 10.0;
+        let registry = SchemaRegistry::builtin();
+        let p = openusd::sdf::path("/Mover").unwrap();
+        registry.patch_prim(&live.stage, &p, &mut world, mover, &[]);
+        assert_eq!(
+            world.get::<Transform>(mover).unwrap().translation,
+            Vec3::new(10.0, 0.0, 0.0),
+            "re-sampled at t=10"
+        );
+
+        // Halfway is linearly interpolated.
+        world.resource_mut::<StageTime>().current = 5.0;
+        registry.patch_prim(&live.stage, &p, &mut world, mover, &[]);
+        assert!(
+            (world.get::<Transform>(mover).unwrap().translation.x - 5.0).abs() < 1e-4,
+            "t=5 interpolates to x≈5"
+        );
+    }
+
+    /// The full animation loop through the plugin schedule: scrubbing
+    /// `StageTime` resamples the animated entity on the next update.
+    #[test]
+    fn plugin_resamples_on_time_scrub() {
+        let live = LiveStage::new(animated_translate_stage());
+        let mut app = App::new();
+        app.add_plugins(LiveStagePlugin);
+        app.world_mut().insert_non_send(live);
+
+        app.world_mut().run_schedule(Update); // projects at t=0
+        let mover = app.world().resource::<PrimEntities>().entity("/Mover").unwrap();
+        assert_eq!(
+            app.world().get::<Transform>(mover).unwrap().translation.x,
+            0.0
+        );
+
+        // Scrub to t=10 and tick.
+        app.world_mut().resource_mut::<StageTime>().current = 10.0;
+        app.world_mut().run_schedule(Update);
+        assert!(
+            (app.world().get::<Transform>(mover).unwrap().translation.x - 10.0).abs() < 1e-4,
+            "plugin resampled the animated transform after the scrub"
+        );
+    }
+
+    /// A static (unanimated) prim is not flagged animated and ignores StageTime.
+    #[test]
+    fn static_prim_not_animated() {
+        let stage = Stage::builder().in_memory("static.usda").unwrap();
+        stage
+            .define_prim("/Fixed")
+            .unwrap()
+            .set_type_name("Xform")
+            .unwrap();
+        stage
+            .create_attribute("/Fixed.xformOp:translate", "double3")
+            .unwrap()
+            .set(Value::Vec3d(openusd::gf::Vec3d::from([1.0, 2.0, 3.0])))
+            .unwrap();
+        stage
+            .create_attribute("/Fixed.xformOpOrder", "token[]")
+            .unwrap()
+            .set(Value::TokenVec(vec!["xformOp:translate".into()]))
+            .unwrap();
+
+        let live = LiveStage::new(stage);
+        let mut world = World::new();
+        world.insert_resource(StageTime { current: 999.0 });
+        let mut map = PrimEntities::default();
+        project_stage(&mut world, &live, &mut map);
+        let e = map.entity("/Fixed").unwrap();
+        assert!(
+            !world.resource::<AnimatedPrims>().0.contains("/Fixed"),
+            "no time samples → not animated"
+        );
+        assert_eq!(
+            world.get::<Transform>(e).unwrap().translation,
+            Vec3::new(1.0, 2.0, 3.0),
+            "static value regardless of StageTime"
+        );
+    }
+
+    /// UsdSkel end-to-end: a skinned mesh projects a `Mesh3d`, is flagged
+    /// animated, and re-deforms (new mesh handle) when `StageTime` scrubs.
+    #[test]
+    fn skinned_mesh_projects_and_resamples() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/skel_test_simple.usda"
+        );
+        let stage = Stage::open(path).expect("open skel_test_simple.usda");
+        let live = LiveStage::new(stage);
+        let mut world = World::new();
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(Assets::<StandardMaterial>::default());
+        world.insert_resource(StageTime { current: 0.0 });
+        let mut map = PrimEntities::default();
+        project_stage(&mut world, &live, &mut map);
+
+        let bar = map.entity("/Test/Bar").expect("skinned mesh projected");
+        let h0 = world
+            .get::<Mesh3d>(bar)
+            .expect("skinned mesh has geometry")
+            .0
+            .clone();
+        assert!(
+            world.resource::<AnimatedPrims>().0.contains("/Test/Bar"),
+            "skinned mesh flagged animated (its samples live on the SkelAnimation)"
+        );
+
+        // Scrub to t=30 and re-patch → a freshly deformed mesh.
+        world.resource_mut::<StageTime>().current = 30.0;
+        let registry = SchemaRegistry::builtin();
+        let p = openusd::sdf::path("/Test/Bar").unwrap();
+        registry.patch_prim(&live.stage, &p, &mut world, bar, &[]);
+        let h30 = world.get::<Mesh3d>(bar).unwrap().0.clone();
+        assert_ne!(h0, h30, "resampling produced a new deformed mesh");
+    }
+
+    /// Payload lazy load/unload (PLAN Phase 3) — the `queue_spawn_scene`
+    /// analog. Unloading despawns the payloaded subtree and marks the prim
+    /// `UsdPayloadUnloaded`; loading re-materializes it.
+    #[test]
+    fn payload_load_unload_streams_subtree() {
+        use crate::route::payload::UsdPayloadUnloaded;
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/payload_test.usda"
+        );
+        let stage = Stage::open(path).expect("open payload_test.usda");
+        let live = LiveStage::new(stage);
+        let mut world = reflect_world(|r| r.register::<Health>());
+        let mut map = PrimEntities::default();
+        project_stage(&mut world, &live, &mut map);
+
+        // Payload loads by default → subtree present.
+        let root = map.entity("/Root").expect("payload prim projected");
+        let child = map.entity("/Root/Child").expect("payloaded child projected");
+        assert_eq!(world.get::<Health>(child).unwrap().max, 42.0);
+        assert!(world.get::<UsdPayloadUnloaded>(root).is_none(), "loaded → no marker");
+
+        // Unload → child despawns, root becomes a placeholder.
+        live.unload_payload("/Root");
+        assert!(live.has_changes(), "unload fired the change sink");
+        apply_changes(&mut world, &live, &mut map);
+        assert!(map.entity("/Root/Child").is_none(), "payloaded subtree despawned");
+        let root = map.entity("/Root").expect("payload prim stays as placeholder");
+        assert!(
+            world.get::<UsdPayloadUnloaded>(root).is_some(),
+            "unloaded payload marked"
+        );
+
+        // Load → subtree re-materializes, marker cleared.
+        live.load_payload("/Root");
+        apply_changes(&mut world, &live, &mut map);
+        let child = map.entity("/Root/Child").expect("payloaded child re-materialized");
+        assert_eq!(world.get::<Health>(child).unwrap().max, 42.0);
+        assert!(
+            world.get::<UsdPayloadUnloaded>(map.entity("/Root").unwrap()).is_none(),
+            "reload cleared the marker"
+        );
+    }
+
+    /// Variant switching (PLAN Phase 2) — a capability BSN has no equivalent
+    /// for. Authoring a variant selection is a composition change, so the live
+    /// loop reconciles and the reflect component reprojects to the new variant.
+    #[test]
+    fn variant_switch_reprojects() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/variant_test.usda"
+        );
+        let stage = Stage::open(path).expect("open variant_test.usda");
+        let live = LiveStage::new(stage);
+        let mut world = reflect_world(|r| r.register::<Health>());
+        let mut map = PrimEntities::default();
+        project_stage(&mut world, &live, &mut map);
+
+        let e = map.entity("/Prop").expect("prim projected");
+        assert_eq!(
+            world.get::<Health>(e).unwrap().max,
+            100.0,
+            "default 'red' variant projected"
+        );
+        assert_eq!(
+            crate::read::variants::variant_selection(
+                &live.stage,
+                &openusd::sdf::path("/Prop").unwrap(),
+                "look"
+            ),
+            Some("red".to_string()),
+        );
+
+        // Switch the variant — fires the sink; the live loop reconciles.
+        crate::authoring::set_variant(&live.stage, "/Prop", "look", "blue").unwrap();
+        assert!(live.has_changes(), "variant switch fired the change sink");
+        apply_changes(&mut world, &live, &mut map);
+
+        let e = map.entity("/Prop").expect("prim still projected");
+        assert_eq!(
+            world.get::<Health>(e).unwrap().max,
+            250.0,
+            "'blue' variant reprojected the component"
+        );
+    }
+
+    /// Variant selection round-trips through `EditHistory` undo/redo.
+    #[test]
+    fn variant_undo_redo() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/variant_test.usda"
+        );
+        let stage = Stage::open(path).unwrap();
+        let mut hist = crate::authoring::EditHistory::default();
+        let prim = openusd::sdf::path("/Prop").unwrap();
+        let sel =
+            |s: &Stage| crate::read::variants::variant_selection(s, &prim, "look");
+
+        hist.set_variant(&stage, "/Prop", "look", "blue").unwrap();
+        assert_eq!(sel(&stage).as_deref(), Some("blue"));
+        assert!(hist.undo(&stage).unwrap());
+        assert_eq!(sel(&stage).as_deref(), Some("red"), "undo → prior variant");
+        assert!(hist.redo(&stage).unwrap());
+        assert_eq!(sel(&stage).as_deref(), Some("blue"), "redo → switched variant");
+    }
+
+    #[test]
+    fn path_splitting_helpers() {
+        assert_eq!(prim_of("/A/B.foo"), "/A/B");
+        assert_eq!(prim_of("/A/B"), "/A/B");
+        assert_eq!(prim_of("/"), "/");
+        assert_eq!(property_of("/A/B.foo:bar"), Some("foo:bar"));
+        assert_eq!(property_of("/A/B"), None);
+        assert_eq!(parent_path("/A/B/C"), "/A/B");
+        assert_eq!(parent_path("/A"), "/");
     }
 
     #[test]

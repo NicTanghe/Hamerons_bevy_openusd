@@ -77,7 +77,11 @@ fn install_panic_logger() {
         tracing::error!(target: "usdview", "PANIC: {info}");
         eprint!("{msg}");
         use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(LOG_FILE) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(LOG_FILE)
+        {
             let _ = f.write_all(msg.as_bytes());
         }
         prev(info);
@@ -145,12 +149,14 @@ struct UsdApp {
 impl WindowApp for UsdApp {
     fn new(ctx: CreationContext<'_>) -> Self {
         // Initial file: `USD_FILE` env var, else argv[1], else none.
-        let path = std::env::var("USD_FILE").ok().or_else(|| std::env::args().nth(1));
+        let path = std::env::var("USD_FILE")
+            .ok()
+            .or_else(|| std::env::args().nth(1));
         let viewport_path = path.clone();
         let load_queue: LoadSlot = Arc::new(Mutex::new(None));
         let queue = load_queue.clone();
         let bevy_view = mara_bevy::MaraBevyViewport::with_render_state_and_content(
-            ctx.render_state,
+            ctx.__internal_render_state(),
             move |app: &mut App| configure_usd_app(app, viewport_path.clone(), queue.clone()),
         );
 
@@ -201,7 +207,7 @@ impl WindowApp for UsdApp {
         // Viewport (root, behind the ribbon-avoiding panes).
         {
             let mut vctx = host.view_ctx(workspace, accent, RibbonAvoidance::all());
-            bevy_view.show(&mut vctx, host.render_state(), accent);
+            bevy_view.show(&mut vctx, host.gpu(), accent);
         }
 
         // Panes + ribbon rail. Mara owns the pane/ribbon wiring,
@@ -501,7 +507,7 @@ fn configure_usd_app(app: &mut App, path: Option<String>, load_queue: LoadSlot) 
         .init_resource::<mara_bevy::BevyViewportInput>()
         .insert_resource(mara_bevy::GroundGrid {
             visible: true,
-            color: Color::srgba(0.30, 0.38, 0.50, 0.42),
+            color: grid_color(1.0),
         })
         .insert_resource(ClearColor(Color::srgb_u8(12, 14, 18)))
         .insert_resource(UsdArg(path))
@@ -512,7 +518,193 @@ fn configure_usd_app(app: &mut App, path: Option<String>, load_queue: LoadSlot) 
         )
         .add_systems(Startup, open_usd)
         .add_systems(Update, mara_bevy::apply_viewport_camera_input_system)
+        .add_systems(
+            Update,
+            draw_large_editor_grid_system.after(mara_bevy::apply_viewport_camera_input_system),
+        )
         .add_systems(Update, poll_reload);
+}
+
+/// Extend Mara's small close-range gizmo grid with a large camera-following
+/// editor grid. It keeps a stable world spacing and fades at the far edge so
+/// lines do not pop/flicker as the camera moves.
+fn draw_large_editor_grid_system(
+    grid: Option<Res<mara_bevy::GroundGrid>>,
+    cameras: Query<&mara_bevy::ChaseCamera>,
+    mut gizmos: Gizmos,
+) {
+    let Some(grid) = grid else {
+        return;
+    };
+    if !grid.visible {
+        return;
+    }
+    let Some(camera) = cameras.iter().next() else {
+        return;
+    };
+
+    const STEP: f32 = 32.0;
+    const MIN_HALF_EXTENT: f32 = 16_384.0;
+    const MAX_HALF_LINES: i32 = 1024;
+    // Mara's built-in grid covers roughly ±32 units at 1-unit spacing. Do not
+    // draw the coarse extension over that same center area, or coincident
+    // gizmo lines fight and shimmer.
+    const NEAR_SKIP_EXTENT: f32 = 34.0;
+    let focus = camera.focus;
+    let step = STEP;
+    let requested_half_extent = (camera.distance * 12.0).max(MIN_HALF_EXTENT);
+    let half_lines = ((requested_half_extent / step).ceil() as i32).clamp(512, MAX_HALF_LINES);
+    let half_extent = half_lines as f32 * step;
+    let fade_start = half_extent * 0.55;
+    let center_x = (focus.x / step).round() * step;
+    let center_z = (focus.z / step).round() * step;
+    let near_center_x = focus.x.round();
+    let near_center_z = focus.z.round();
+    let near_min_x = near_center_x - NEAR_SKIP_EXTENT;
+    let near_max_x = near_center_x + NEAR_SKIP_EXTENT;
+    let near_min_z = near_center_z - NEAR_SKIP_EXTENT;
+    let near_max_z = near_center_z + NEAR_SKIP_EXTENT;
+    let min_x = center_x - half_extent;
+    let max_x = center_x + half_extent;
+    let min_z = center_z - half_extent;
+    let max_z = center_z + half_extent;
+
+    for i in -half_lines..=half_lines {
+        let x = center_x + i as f32 * step;
+        let z = center_z + i as f32 * step;
+        let x_alpha = far_grid_alpha((x - center_x).abs(), fade_start, half_extent);
+        let z_alpha = far_grid_alpha((z - center_z).abs(), fade_start, half_extent);
+
+        if x >= near_min_x && x <= near_max_x {
+            draw_fading_grid_segment(
+                &mut gizmos,
+                Vec3::new(x, 0.0, min_z),
+                Vec3::new(x, 0.0, near_min_z),
+                center_x,
+                center_z,
+                fade_start,
+                half_extent,
+                x_alpha,
+            );
+            draw_fading_grid_segment(
+                &mut gizmos,
+                Vec3::new(x, 0.0, near_max_z),
+                Vec3::new(x, 0.0, max_z),
+                center_x,
+                center_z,
+                fade_start,
+                half_extent,
+                x_alpha,
+            );
+        } else {
+            draw_fading_grid_segment(
+                &mut gizmos,
+                Vec3::new(x, 0.0, min_z),
+                Vec3::new(x, 0.0, center_z),
+                center_x,
+                center_z,
+                fade_start,
+                half_extent,
+                x_alpha,
+            );
+            draw_fading_grid_segment(
+                &mut gizmos,
+                Vec3::new(x, 0.0, center_z),
+                Vec3::new(x, 0.0, max_z),
+                center_x,
+                center_z,
+                fade_start,
+                half_extent,
+                x_alpha,
+            );
+        }
+
+        if z >= near_min_z && z <= near_max_z {
+            draw_fading_grid_segment(
+                &mut gizmos,
+                Vec3::new(min_x, 0.0, z),
+                Vec3::new(near_min_x, 0.0, z),
+                center_x,
+                center_z,
+                fade_start,
+                half_extent,
+                z_alpha,
+            );
+            draw_fading_grid_segment(
+                &mut gizmos,
+                Vec3::new(near_max_x, 0.0, z),
+                Vec3::new(max_x, 0.0, z),
+                center_x,
+                center_z,
+                fade_start,
+                half_extent,
+                z_alpha,
+            );
+        } else {
+            draw_fading_grid_segment(
+                &mut gizmos,
+                Vec3::new(min_x, 0.0, z),
+                Vec3::new(center_x, 0.0, z),
+                center_x,
+                center_z,
+                fade_start,
+                half_extent,
+                z_alpha,
+            );
+            draw_fading_grid_segment(
+                &mut gizmos,
+                Vec3::new(center_x, 0.0, z),
+                Vec3::new(max_x, 0.0, z),
+                center_x,
+                center_z,
+                fade_start,
+                half_extent,
+                z_alpha,
+            );
+        }
+    }
+}
+
+fn draw_fading_grid_segment(
+    gizmos: &mut Gizmos,
+    start: Vec3,
+    end: Vec3,
+    center_x: f32,
+    center_z: f32,
+    fade_start: f32,
+    fade_end: f32,
+    line_alpha: f32,
+) {
+    if start.distance_squared(end) > 0.01 {
+        let start_alpha = line_alpha
+            * far_grid_alpha(
+                (start.x - center_x).abs().max((start.z - center_z).abs()),
+                fade_start,
+                fade_end,
+            );
+        let end_alpha = line_alpha
+            * far_grid_alpha(
+                (end.x - center_x).abs().max((end.z - center_z).abs()),
+                fade_start,
+                fade_end,
+            );
+        if start_alpha > 0.01 || end_alpha > 0.01 {
+            gizmos.line_gradient(start, end, grid_color(start_alpha), grid_color(end_alpha));
+        }
+    }
+}
+
+fn far_grid_alpha(distance: f32, fade_start: f32, fade_end: f32) -> f32 {
+    1.0 - smoothstep01((distance - fade_start) / (fade_end - fade_start).max(1.0))
+}
+
+fn smoothstep01(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn grid_color(alpha: f32) -> Color {
+    Color::srgba(0.44, 0.44, 0.46, 0.35 * alpha.clamp(0.0, 1.0))
 }
 
 /// Pick up a path pushed by the egui "Open" action, despawn the current scene,

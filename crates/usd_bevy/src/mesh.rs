@@ -106,18 +106,18 @@ pub fn mesh_from_usd_subset(read: &ReadMesh, face_subset: Option<&[i32]>) -> Mes
     mesh
 }
 
-/// Build the common case: indexed triangle list, one vertex per USD point.
-/// Uses vertex-level or constant interpolation only.
-fn build_indexed(
-    read: &ReadMesh,
-    face_subset: Option<&[i32]>,
-) -> (
+/// Assembled mesh attributes: `(positions, normals?, uvs, colors?, indices)`.
+type BuiltMesh = (
     Vec<[f32; 3]>,
     Option<Vec<[f32; 3]>>,
     Vec<[f32; 2]>,
     Option<Vec<[f32; 4]>>,
     Vec<u32>,
-) {
+);
+
+/// Build the common case: indexed triangle list, one vertex per USD point.
+/// Uses vertex-level or constant interpolation only.
+fn build_indexed(read: &ReadMesh, face_subset: Option<&[i32]>) -> BuiltMesh {
     let positions = read.points.clone();
 
     // Normals: pick up vertex-indexed data if present; else None and let
@@ -127,7 +127,7 @@ fn build_indexed(
     // smooth normals over authored ones.
     let normals = read.normals.as_ref().and_then(|p| match p.interpolation {
         Interpolation::Vertex | Interpolation::Varying => {
-            Some(expand_vertex_primvar(&p, positions.len(), [0.0, 1.0, 0.0]))
+            Some(expand_vertex_primvar(p, positions.len(), [0.0, 1.0, 0.0]))
         }
         Interpolation::Constant if !p.values.is_empty() => Some(vec![p.values[0]; positions.len()]),
         _ => None,
@@ -138,7 +138,7 @@ fn build_indexed(
         .as_ref()
         .and_then(|p| match p.interpolation {
             Interpolation::Vertex | Interpolation::Varying => {
-                Some(expand_vertex_primvar(&p, positions.len(), [0.0, 0.0]))
+                Some(expand_vertex_primvar(p, positions.len(), [0.0, 0.0]))
             }
             _ => None,
         })
@@ -213,17 +213,8 @@ fn build_vertex_colors_indexed(read: &ReadMesh, vertex_count: usize) -> Option<V
 
 /// Build the fully-expanded form: one vertex per face corner so `faceVarying`
 /// primvars (cube uvs, seams) can be represented.
-fn build_expanded(
-    read: &ReadMesh,
-    face_subset: Option<&[i32]>,
-) -> (
-    Vec<[f32; 3]>,
-    Option<Vec<[f32; 3]>>,
-    Vec<[f32; 2]>,
-    Option<Vec<[f32; 4]>>,
-    Vec<u32>,
-) {
-    let corner_count: usize = read.face_vertex_counts.iter().map(|c| *c as usize).sum();
+fn build_expanded(read: &ReadMesh, face_subset: Option<&[i32]>) -> BuiltMesh {
+    let corner_count: usize = read.face_vertex_counts.iter().map(|c| (*c).max(0) as usize).sum();
     let mut positions = Vec::with_capacity(corner_count);
     let mut normals_out: Vec<[f32; 3]> = Vec::with_capacity(corner_count);
     let mut uvs_out: Vec<[f32; 2]> = Vec::with_capacity(corner_count);
@@ -245,9 +236,12 @@ fn build_expanded(
 
     let mut corner_ix: usize = 0;
     for (face_ix, face_verts) in read.face_vertex_counts.iter().enumerate() {
-        for k in 0..(*face_verts as usize) {
-            let point_ix = read.face_vertex_indices[corner_ix + k] as usize;
-            positions.push(read.points[point_ix]);
+        for k in 0..((*face_verts).max(0) as usize) {
+            // Tolerate malformed indices: a missing corner reads as 0, and an
+            // index past the point buffer clamps to the last point (never OOB).
+            let raw = read.face_vertex_indices.get(corner_ix + k).copied().unwrap_or(0);
+            let point_ix = (raw.max(0) as usize).min(read.points.len().saturating_sub(1));
+            positions.push(read.points.get(point_ix).copied().unwrap_or([0.0, 0.0, 0.0]));
             if want_normals {
                 normals_out.push(corner_normal(read, face_ix, corner_ix + k, point_ix));
             } else if let Some(ref ns) = smooth_per_point {
@@ -265,7 +259,7 @@ fn build_expanded(
                 colors_out.push(corner_color(read, face_ix, corner_ix + k, point_ix));
             }
         }
-        corner_ix += *face_verts as usize;
+        corner_ix += (*face_verts).max(0) as usize;
     }
 
     // After expansion, indices become sequential 0..N per face, then
@@ -312,24 +306,42 @@ fn build_expanded(
 /// by any face fall back to (0,1,0).
 fn compute_point_smooth_normals(read: &ReadMesh) -> Vec<[f32; 3]> {
     let mut accum = vec![Vec3::ZERO; read.points.len()];
+    // Tolerate a short/oversized `faceVertexIndices` (malformed USD): a missing
+    // corner reads as index 0, and any index past the point buffer is skipped
+    // rather than panicking.
+    let fvi = |c: usize| -> usize {
+        read.face_vertex_indices.get(c).copied().unwrap_or(0).max(0) as usize
+    };
     let mut corner_ix = 0usize;
     for face_verts in &read.face_vertex_counts {
-        let n = *face_verts as usize;
+        let n = (*face_verts).max(0) as usize;
         if n >= 3 {
-            let i0 = read.face_vertex_indices[corner_ix] as usize;
-            let p0 = Vec3::from_array(read.points[i0]);
-            for k in 1..(n - 1) {
-                let i1 = read.face_vertex_indices[corner_ix + k] as usize;
-                let i2 = read.face_vertex_indices[corner_ix + k + 1] as usize;
-                let p1 = Vec3::from_array(read.points[i1]);
-                let p2 = Vec3::from_array(read.points[i2]);
-                let face_n = match read.orientation {
-                    Orientation::RightHanded => (p1 - p0).cross(p2 - p0),
-                    Orientation::LeftHanded => (p2 - p0).cross(p1 - p0),
-                };
-                accum[i0] += face_n;
-                accum[i1] += face_n;
-                accum[i2] += face_n;
+            let i0 = fvi(corner_ix);
+            if let Some(p0a) = read.points.get(i0) {
+                let p0 = Vec3::from_array(*p0a);
+                for k in 1..(n - 1) {
+                    let i1 = fvi(corner_ix + k);
+                    let i2 = fvi(corner_ix + k + 1);
+                    if let (Some(p1a), Some(p2a)) =
+                        (read.points.get(i1), read.points.get(i2))
+                    {
+                        let p1 = Vec3::from_array(*p1a);
+                        let p2 = Vec3::from_array(*p2a);
+                        let face_n = match read.orientation {
+                            Orientation::RightHanded => (p1 - p0).cross(p2 - p0),
+                            Orientation::LeftHanded => (p2 - p0).cross(p1 - p0),
+                        };
+                        if let Some(a) = accum.get_mut(i0) {
+                            *a += face_n;
+                        }
+                        if let Some(a) = accum.get_mut(i1) {
+                            *a += face_n;
+                        }
+                        if let Some(a) = accum.get_mut(i2) {
+                            *a += face_n;
+                        }
+                    }
+                }
             }
         }
         corner_ix += n;
@@ -517,13 +529,20 @@ fn triangulate_polygon(
     orientation: Orientation,
     face_subset: Option<&[i32]>,
 ) -> Vec<u32> {
+    // No vertices → no triangles. Emitting indices into an empty buffer would
+    // later panic Bevy's normal/tangent generation.
+    if positions.is_empty() {
+        return Vec::new();
+    }
     // Precompute each face's starting corner so a subset by face index
-    // jumps straight to the right slice without rewalking the counts.
+    // jumps straight to the right slice without rewalking the counts. Negative
+    // counts (malformed USD) contribute zero rather than wrapping to a huge
+    // `usize` that would overflow the running sum.
     let mut face_starts = Vec::with_capacity(counts.len());
     let mut running = 0usize;
     for c in counts {
         face_starts.push(running);
-        running += *c as usize;
+        running += (*c).max(0) as usize;
     }
 
     let face_iter: Box<dyn Iterator<Item = usize>> = match face_subset {
@@ -540,29 +559,45 @@ fn triangulate_polygon(
         Orientation::RightHanded => out.extend_from_slice(&[a, b, c]),
         Orientation::LeftHanded => out.extend_from_slice(&[a, c, b]),
     };
+    let nv = positions.len();
+    // Read a corner's vertex index, tolerating an index array shorter than the
+    // counts imply (malformed USD) — a missing corner reads as index 0.
+    let idx_at = |c: usize| -> i32 { indices.get(c).copied().unwrap_or(0) };
+    // Clamp a raw (possibly out-of-range or negative) point index so an emitted
+    // mesh index never points past the vertex buffer (which the GPU would read
+    // out of bounds).
+    let clamp_v = |i: i32| -> u32 {
+        if nv == 0 {
+            0
+        } else {
+            (i.max(0) as usize).min(nv - 1) as u32
+        }
+    };
     let pos_of = |idx: i32| -> Vec3 {
-        let p = positions[idx as usize];
-        Vec3::new(p[0], p[1], p[2])
+        match positions.get(idx.max(0) as usize) {
+            Some(p) => Vec3::new(p[0], p[1], p[2]),
+            None => Vec3::ZERO,
+        }
     };
 
     for face_ix in face_iter {
         let face_start = face_starts[face_ix];
-        let n = counts[face_ix] as usize;
+        let n = counts[face_ix].max(0) as usize;
         if n < 3 {
             continue;
         }
         if n == 3 {
-            let a = indices[face_start] as u32;
-            let b = indices[face_start + 1] as u32;
-            let c = indices[face_start + 2] as u32;
+            let a = clamp_v(idx_at(face_start));
+            let b = clamp_v(idx_at(face_start + 1));
+            let c = clamp_v(idx_at(face_start + 2));
             emit(&mut out, a, b, c);
             continue;
         }
         if n == 4 {
-            let i0 = indices[face_start];
-            let i1 = indices[face_start + 1];
-            let i2 = indices[face_start + 2];
-            let i3 = indices[face_start + 3];
+            let i0 = idx_at(face_start);
+            let i1 = idx_at(face_start + 1);
+            let i2 = idx_at(face_start + 2);
+            let i3 = idx_at(face_start + 3);
             // Pick the shorter diagonal: 0–2 vs 1–3.
             let p0 = pos_of(i0);
             let p1 = pos_of(i1);
@@ -571,16 +606,25 @@ fn triangulate_polygon(
             let d02 = (p2 - p0).length_squared();
             let d13 = (p3 - p1).length_squared();
             if d02 <= d13 {
-                emit(&mut out, i0 as u32, i1 as u32, i2 as u32);
-                emit(&mut out, i0 as u32, i2 as u32, i3 as u32);
+                emit(&mut out, clamp_v(i0), clamp_v(i1), clamp_v(i2));
+                emit(&mut out, clamp_v(i0), clamp_v(i2), clamp_v(i3));
             } else {
-                emit(&mut out, i1 as u32, i2 as u32, i3 as u32);
-                emit(&mut out, i1 as u32, i3 as u32, i0 as u32);
+                emit(&mut out, clamp_v(i1), clamp_v(i2), clamp_v(i3));
+                emit(&mut out, clamp_v(i1), clamp_v(i3), clamp_v(i0));
             }
             continue;
         }
-        // n >= 5: ear clip. Collect corner positions and indices.
-        let face_indices: Vec<i32> = indices[face_start..face_start + n].to_vec();
+        // n >= 5: ear clip. Clamp the slice end so a counts/indices mismatch
+        // can't panic; skip the face if fewer than a triangle survives. Corner
+        // indices are pre-clamped so ear-clip's emitted mesh indices stay valid.
+        let end = (face_start + n).min(indices.len());
+        if end.saturating_sub(face_start) < 3 {
+            continue;
+        }
+        let face_indices: Vec<i32> = indices[face_start..end]
+            .iter()
+            .map(|i| clamp_v(*i) as i32)
+            .collect();
         let face_positions: Vec<Vec3> = face_indices.iter().map(|i| pos_of(*i)).collect();
         ear_clip_into(&face_positions, &face_indices, &mut out, orientation);
     }
@@ -680,8 +724,7 @@ fn ear_clip_into(
             }
             // Ear test: no other remaining vertex inside triangle (a,b,c).
             let mut contains_other = false;
-            for j in 0..m {
-                let idx = remaining[j];
+            for &idx in &remaining {
                 if idx == i_prev || idx == i_cur || idx == i_next {
                     continue;
                 }
@@ -819,5 +862,120 @@ pub fn rotate_mesh(mesh: &mut Mesh, rot: bevy::math::Quat) {
             let v = rot * Vec3::new(n[0], n[1], n[2]);
             *n = [v.x, v.y, v.z];
         }
+    }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+    use crate::read::geom::SubdivScheme;
+
+    /// Minimal `ReadMesh` with the geometry under test and everything else empty.
+    fn mesh(points: Vec<[f32; 3]>, counts: Vec<i32>, indices: Vec<i32>) -> ReadMesh {
+        ReadMesh {
+            points,
+            face_vertex_counts: counts,
+            face_vertex_indices: indices,
+            normals: None,
+            uvs: None,
+            orientation: Orientation::RightHanded,
+            display_color: None,
+            display_opacity: None,
+            subsets: Vec::new(),
+            double_sided: false,
+            extent: None,
+            subdivision_scheme: SubdivScheme::None,
+        }
+    }
+
+    /// Bevy silently drops a mesh whose attribute lengths disagree with
+    /// `ATTRIBUTE_POSITION`; every build path must keep them equal.
+    fn assert_consistent(m: &Mesh) {
+        let pos = m.count_vertices();
+        if let Some(VertexAttributeValues::Float32x2(uv)) = m.attribute(Mesh::ATTRIBUTE_UV_0) {
+            assert_eq!(uv.len(), pos, "uv length matches positions");
+        }
+        if let Some(VertexAttributeValues::Float32x3(n)) = m.attribute(Mesh::ATTRIBUTE_NORMAL) {
+            assert_eq!(n.len(), pos, "normal length matches positions");
+        }
+    }
+
+    #[test]
+    fn out_of_range_indices_do_not_panic() {
+        // A triangle references point 99 with only 3 points authored.
+        let m = mesh(
+            vec![[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]],
+            vec![3],
+            vec![0, 1, 99],
+        );
+        assert_consistent(&mesh_from_usd(&m));
+    }
+
+    #[test]
+    fn counts_exceeding_indices_do_not_panic() {
+        // Counts claim a quad, but only three indices exist.
+        let m = mesh(
+            vec![[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]],
+            vec![4],
+            vec![0, 1, 2],
+        );
+        assert_consistent(&mesh_from_usd(&m));
+    }
+
+    #[test]
+    fn ngon_with_truncated_indices_does_not_panic() {
+        // A declared 6-gon whose index array is too short — exercises the
+        // ear-clip slice guard.
+        let m = mesh(
+            vec![[0., 0., 0.], [1., 0., 0.], [1., 1., 0.]],
+            vec![6],
+            vec![0, 1, 2],
+        );
+        let _ = mesh_from_usd(&m);
+    }
+
+    #[test]
+    fn negative_counts_and_indices_do_not_panic() {
+        let m = mesh(
+            vec![[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]],
+            vec![-1, 3],
+            vec![-5, 1, 2],
+        );
+        assert_consistent(&mesh_from_usd(&m));
+    }
+
+    #[test]
+    fn expanded_path_out_of_range_does_not_panic() {
+        // A faceVarying uv forces the expanded build path; indices still point
+        // past the buffer.
+        let mut m = mesh(
+            vec![[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]],
+            vec![3],
+            vec![0, 1, 50],
+        );
+        m.uvs = Some(MeshPrimvar {
+            values: vec![[0., 0.], [1., 0.], [0., 1.]],
+            interpolation: Interpolation::FaceVarying,
+            indices: Vec::new(),
+        });
+        assert_consistent(&mesh_from_usd(&m));
+    }
+
+    #[test]
+    fn empty_points_with_faces_do_not_panic() {
+        let m = mesh(Vec::new(), vec![3], vec![0, 1, 2]);
+        let _ = mesh_from_usd(&m);
+    }
+
+    #[test]
+    fn valid_quad_still_triangulates() {
+        // Regression: a well-formed quad must still fan into two triangles.
+        let m = mesh(
+            vec![[0., 0., 0.], [1., 0., 0.], [1., 1., 0.], [0., 1., 0.]],
+            vec![4],
+            vec![0, 1, 2, 3],
+        );
+        let mesh = mesh_from_usd(&m);
+        assert_eq!(mesh.indices().map(|i| i.len()), Some(6), "quad → 2 tris");
     }
 }

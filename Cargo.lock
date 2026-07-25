@@ -3363,13 +3363,14 @@ dependencies = [
 
 [[package]]
 name = "mara"
-version = "0.3.3"
+version = "0.4.1"
 dependencies = [
  "egui",
  "egui-wgpu",
  "egui-winit",
  "mara_bevy",
  "mara_core",
+ "mara_gpu",
  "pollster",
  "wgpu",
  "winit",
@@ -3377,26 +3378,27 @@ dependencies = [
 
 [[package]]
 name = "mara_bevy"
-version = "0.3.3"
+version = "0.4.1"
 dependencies = [
  "bevy",
  "crossbeam-channel",
  "egui",
  "egui-wgpu",
  "mara_core",
+ "mara_gpu",
  "wgpu",
 ]
 
 [[package]]
 name = "mara_code"
-version = "0.3.3"
+version = "0.4.1"
 dependencies = [
  "egui",
 ]
 
 [[package]]
 name = "mara_core"
-version = "0.3.3"
+version = "0.4.1"
 dependencies = [
  "egui",
  "iconflow",
@@ -3406,8 +3408,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mara_gpu"
+version = "0.4.1"
+dependencies = [
+ "egui-wgpu",
+]
+
+[[package]]
 name = "mara_graph"
-version = "0.3.3"
+version = "0.4.1"
 dependencies = [
  "egui",
  "egui-scale",
@@ -5360,6 +5369,17 @@ dependencies = [
  "glam 0.30.10",
  "log",
  "openusd",
+ "usd_macro",
+]
+
+[[package]]
+name = "usd_macro"
+version = "0.0.1"
+dependencies = [
+ "openusd",
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

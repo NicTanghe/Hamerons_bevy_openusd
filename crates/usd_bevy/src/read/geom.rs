@@ -386,7 +386,7 @@ pub fn read_nurbs_curves(stage: &Stage, prim: &Path) -> anyhow::Result<Option<Re
         let mut out = Vec::with_capacity(curve_vertex_counts.len());
         let mut k_cursor = 0usize;
         for (i, count) in curve_vertex_counts.iter().enumerate() {
-            let n = (*count as usize).max(0);
+            let n = (*count).max(0) as usize;
             let p = order.get(i).copied().unwrap_or(4) as usize;
             let nk = n + p;
             if k_cursor + nk <= knots.len() && p > 0 && n > 0 {
@@ -554,6 +554,23 @@ pub fn read_points(stage: &Stage, prim: &Path) -> anyhow::Result<Option<ReadPoin
 
 pub fn read_purpose(stage: &Stage, prim: &Path) -> anyhow::Result<String> {
     Ok(read_token(stage, prim, "purpose")?.unwrap_or_else(|| "default".to_string()))
+}
+
+/// Resolve the effective (inherited) `purpose` for `prim`: the closest ancestor
+/// with an authored `purpose`, falling back to `"default"`. Mirrors
+/// `UsdGeomImageable::ComputePurpose` — `purpose` is a *pruning, inherited*
+/// token, so a `Scope` authored as `proxy` makes its whole subtree proxy.
+pub fn read_effective_purpose(stage: &Stage, prim: &Path) -> anyhow::Result<String> {
+    let mut cur = prim.clone();
+    loop {
+        if let Some(t) = read_token(stage, &cur, "purpose")? {
+            return Ok(t);
+        }
+        match cur.parent() {
+            Some(p) => cur = p,
+            None => return Ok("default".to_string()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -876,10 +893,10 @@ pub fn read_custom_layer_data(stage: &Stage) -> anyhow::Result<Option<CustomDict
 /// default is an empty array placeholder (common in FX caches).
 fn attr_default(stage: &Stage, prim: &Path, name: &str) -> anyhow::Result<Option<Value>> {
     let attr = stage.prim(prim.clone()).attribute(name);
-    if let Some(v) = attr.get::<Value>()? {
-        if !is_empty_array_value(&v) {
-            return Ok(Some(v));
-        }
+    if let Some(v) = attr.get::<Value>()?
+        && !is_empty_array_value(&v)
+    {
+        return Ok(Some(v));
     }
     Ok(attr
         .time_samples()?
@@ -1051,10 +1068,9 @@ fn read_primvar_interpolation(
         Value::Token(t) => Some(t.as_str().to_string()),
         Value::String(s) => Some(s),
         _ => None,
-    }) {
-        if let Some(i) = Interpolation::parse(&s) {
-            return Ok(Some(i));
-        }
+    }) && let Some(i) = Interpolation::parse(&s)
+    {
+        return Ok(Some(i));
     }
     let fallback_name = format!("{name}:interpolation");
     Ok(read_token(stage, prim, &fallback_name)?

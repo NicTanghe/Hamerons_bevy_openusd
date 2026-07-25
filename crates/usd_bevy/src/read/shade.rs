@@ -6,7 +6,9 @@
 use openusd::sdf::{Path, Value};
 use openusd::usd::Stage;
 
-use super::util::{connections_at, default_at, read_asset_path, read_token_or_string, targets_at};
+use super::util::{
+    connections_at, default_at, read_asset_path, read_token_or_string, read_vec2f, targets_at,
+};
 
 /// Decoded UsdPreviewSurface material. Each channel is `None` (unauthored),
 /// a scalar, or a texture asset path (caller resolves via the AssetServer).
@@ -27,6 +29,30 @@ pub struct ReadPreviewMaterial {
     pub opacity_texture: Option<String>,
     pub emissive_texture: Option<String>,
     pub occlusion_texture: Option<String>,
+
+    /// `UsdTransform2d` on the texture-coordinate chain (scale/rotate/translate
+    /// of `st`), if the network has one. Applied to `StandardMaterial::uv_transform`.
+    pub uv_transform: Option<UvTransform>,
+}
+
+/// A 2D texture-coordinate transform read from a `UsdTransform2d` node:
+/// USD applies it as `st' = rotate(scale * st) + translation`, with rotation in
+/// degrees, counter-clockwise about the origin.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UvTransform {
+    pub translation: [f32; 2],
+    pub rotation_deg: f32,
+    pub scale: [f32; 2],
+}
+
+impl Default for UvTransform {
+    fn default() -> Self {
+        Self {
+            translation: [0.0, 0.0],
+            rotation_deg: 0.0,
+            scale: [1.0, 1.0],
+        }
+    }
 }
 
 /// Read `material:binding` on a geom prim and return the bound Material prim
@@ -94,7 +120,42 @@ pub fn read_preview_material(
             None => {}
         }
     }
+    out.uv_transform = read_uv_transform(stage, material)?;
     Ok(Some(out))
+}
+
+/// Find a `UsdTransform2d` node in the material's shader network and read its
+/// `scale` / `rotation` / `translation` inputs. USD materials generally share a
+/// single st transform across textures, so the first one found is applied
+/// material-wide. `None` when the network has no transform (identity `st`).
+fn read_uv_transform(stage: &Stage, material: &Path) -> anyhow::Result<Option<UvTransform>> {
+    for child in stage
+        .prim(material.clone())
+        .child_names()
+        .unwrap_or_default()
+    {
+        let node = material.append_path(child.as_str())?;
+        if read_token_or_string(stage, &node, "info:id")?.as_deref() != Some("UsdTransform2d") {
+            continue;
+        }
+        let mut t = UvTransform::default();
+        if let Some(s) = read_vec2f(stage, &node, "inputs:scale")? {
+            t.scale = s;
+        }
+        if let Some(tr) = read_vec2f(stage, &node, "inputs:translation")? {
+            t.translation = tr;
+        }
+        if let Some(Value::Float(r)) = default_at(stage, &node.append_property("inputs:rotation")?)?
+        {
+            t.rotation_deg = r;
+        } else if let Some(Value::Double(r)) =
+            default_at(stage, &node.append_property("inputs:rotation")?)?
+        {
+            t.rotation_deg = r as f32;
+        }
+        return Ok(Some(t));
+    }
+    Ok(None)
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -474,7 +535,7 @@ fn shader_kind(stage: &Stage, prim: &Path) -> anyhow::Result<ShaderKind> {
 }
 
 fn read_texture_file(stage: &Stage, tex_prim: &Path) -> anyhow::Result<Option<String>> {
-    Ok(read_asset_path(stage, tex_prim, "inputs:file")?)
+    read_asset_path(stage, tex_prim, "inputs:file")
 }
 
 fn value_to_preview(v: Value) -> Option<ResolvedValue> {
@@ -484,5 +545,81 @@ fn value_to_preview(v: Value) -> Option<ResolvedValue> {
         Value::Vec3f(c) => Some(ResolvedValue::Color3([c.x, c.y, c.z])),
         Value::Vec3d(c) => Some(ResolvedValue::Color3([c.x as f32, c.y as f32, c.z as f32])),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openusd::usd::Stage;
+
+    #[test]
+    fn reads_uv_transform_from_transform2d() {
+        let stage = Stage::builder().in_memory("uv.usda").unwrap();
+        // Material with a preview surface + a UsdTransform2d node on the st chain.
+        stage.define_prim("/Mat").unwrap().set_type_name("Material").unwrap();
+        stage
+            .create_attribute("/Mat.outputs:surface", "token")
+            .unwrap()
+            .set_connections([Path::new("/Mat/Surface.outputs:surface").unwrap()])
+            .unwrap();
+        let surf = stage.define_prim("/Mat/Surface").unwrap();
+        surf.set_type_name("Shader").unwrap();
+        stage
+            .create_attribute("/Mat/Surface.info:id", "token")
+            .unwrap()
+            .set(Value::Token("UsdPreviewSurface".into()))
+            .unwrap();
+        stage.define_prim("/Mat/Xf").unwrap().set_type_name("Shader").unwrap();
+        stage
+            .create_attribute("/Mat/Xf.info:id", "token")
+            .unwrap()
+            .set(Value::Token("UsdTransform2d".into()))
+            .unwrap();
+        stage
+            .create_attribute("/Mat/Xf.inputs:scale", "float2")
+            .unwrap()
+            .set(Value::Vec2f([2.0f32, 3.0f32].into()))
+            .unwrap();
+        stage
+            .create_attribute("/Mat/Xf.inputs:translation", "float2")
+            .unwrap()
+            .set(Value::Vec2f([0.5f32, 0.25f32].into()))
+            .unwrap();
+        stage
+            .create_attribute("/Mat/Xf.inputs:rotation", "float")
+            .unwrap()
+            .set(Value::Float(90.0))
+            .unwrap();
+
+        let read = read_preview_material(&stage, &Path::new("/Mat").unwrap())
+            .unwrap()
+            .expect("material");
+        let uv = read.uv_transform.expect("uv transform");
+        assert_eq!(uv.scale, [2.0, 3.0]);
+        assert_eq!(uv.translation, [0.5, 0.25]);
+        assert_eq!(uv.rotation_deg, 90.0);
+    }
+
+    #[test]
+    fn no_transform2d_yields_none() {
+        let stage = Stage::builder().in_memory("uv2.usda").unwrap();
+        stage.define_prim("/Mat").unwrap().set_type_name("Material").unwrap();
+        stage
+            .create_attribute("/Mat.outputs:surface", "token")
+            .unwrap()
+            .set_connections([Path::new("/Mat/Surface.outputs:surface").unwrap()])
+            .unwrap();
+        stage.define_prim("/Mat/Surface").unwrap().set_type_name("Shader").unwrap();
+        stage
+            .create_attribute("/Mat/Surface.info:id", "token")
+            .unwrap()
+            .set(Value::Token("UsdPreviewSurface".into()))
+            .unwrap();
+
+        let read = read_preview_material(&stage, &Path::new("/Mat").unwrap())
+            .unwrap()
+            .expect("material");
+        assert!(read.uv_transform.is_none());
     }
 }
