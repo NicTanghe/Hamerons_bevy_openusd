@@ -156,7 +156,7 @@ impl WindowApp for UsdApp {
         let load_queue: LoadSlot = Arc::new(Mutex::new(None));
         let queue = load_queue.clone();
         let bevy_view = mara_bevy::MaraBevyViewport::with_render_state_and_content(
-            ctx.__internal_render_state(),
+            ctx.render_state,
             move |app: &mut App| configure_usd_app(app, viewport_path.clone(), queue.clone()),
         );
 
@@ -207,7 +207,7 @@ impl WindowApp for UsdApp {
         // Viewport (root, behind the ribbon-avoiding panes).
         {
             let mut vctx = host.view_ctx(workspace, accent, RibbonAvoidance::all());
-            bevy_view.show(&mut vctx, host.gpu(), accent);
+            bevy_view.show(&mut vctx, host.render_state(), accent);
         }
 
         // Panes + ribbon rail. Mara owns the pane/ribbon wiring,
