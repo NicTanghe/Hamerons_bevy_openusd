@@ -29,30 +29,39 @@ use usd_bevy::live::{LiveStage, LiveStagePlugin, PrimEntities};
 
 /// Everything (trace + panics + backtraces) is mirrored here so a hard crash
 /// is still recoverable after the window dies.
-const LOG_FILE: &str = "/tmp/usdview.log";
+fn log_file() -> std::path::PathBuf {
+    std::env::temp_dir().join("usdview.log")
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
     install_panic_logger();
-    tracing::info!(target: "usdview", "usdview starting — full log at {LOG_FILE}");
+    tracing::info!(target: "usdview", "usdview starting — full log at {}", log_file().display());
     mara::window::run::<UsdApp>()
 }
 
-/// Tracing to BOTH stderr and [`LOG_FILE`]. The embedded Bevy app has no
+/// Tracing to BOTH stderr and [`log_file`]. The embedded Bevy app has no
 /// `LogPlugin`, so without this the logs go nowhere; the file copy survives a
 /// crash that eats stderr. Override the filter with `RUST_LOG`.
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
     use tracing_subscriber::fmt::writer::MakeWriterExt;
-    let _ = std::fs::write(LOG_FILE, ""); // truncate per run
+    let log_file = log_file();
+    let _ = std::fs::write(&log_file, ""); // truncate per run
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("warn,usdview=trace,usd_bevy=trace,openusd=info"));
-    let to_file = || {
-        std::fs::OpenOptions::new()
+    let to_file = move || -> Box<dyn std::io::Write + Send> {
+        match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(LOG_FILE)
-            .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap())
+            .open(&log_file)
+        {
+            Ok(file) => Box::new(file),
+            Err(error) => {
+                eprintln!("failed to open usdview log at {}: {error}", log_file.display());
+                Box::new(std::io::sink())
+            }
+        }
     };
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -77,10 +86,11 @@ fn install_panic_logger() {
         tracing::error!(target: "usdview", "PANIC: {info}");
         eprint!("{msg}");
         use std::io::Write;
+        let log_file = log_file();
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(LOG_FILE)
+            .open(log_file)
         {
             let _ = f.write_all(msg.as_bytes());
         }
