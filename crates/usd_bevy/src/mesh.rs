@@ -81,18 +81,19 @@ pub fn mesh_from_usd_subset(read: &ReadMesh, face_subset: Option<&[i32]>) -> Mes
     if let Some(cs) = colors {
         mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, cs);
     }
-    // Indices first so `compute_smooth_normals` has a topology to
-    // average across — it requires an indexed mesh to find adjacent
-    // faces.
+    // Indices first so fallback normal generation has a topology to average
+    // across — it requires an indexed mesh to find adjacent faces.
     mesh.insert_indices(Indices::U32(indices));
     if let Some(ns) = normals {
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, ns);
     } else {
         // `compute_flat_normals` replicates positions so normals are per-face
-        // — correct but bloats the mesh. Smooth normals keep the original
-        // topology and average adjacent face normals. For plain USD stages
-        // without authored normals that's the intuitive default.
-        mesh.compute_smooth_normals();
+        // — correct but bloats the mesh. Area-weighted normals keep the
+        // original topology and average adjacent face normals. Unlike Bevy's
+        // angle-weighted `compute_smooth_normals`, this path does not discard
+        // dense, small triangles through an absolute edge-length epsilon (the
+        // theatre seat asset has ~340k valid triangles in a one-unit bound).
+        mesh.compute_area_weighted_normals();
     }
     // MikkT vertex tangents — Bevy's PBR shader needs `ATTRIBUTE_TANGENT`
     // to evaluate normal maps correctly. Without them, normal-mapped
@@ -977,5 +978,29 @@ mod hardening_tests {
         );
         let mesh = mesh_from_usd(&m);
         assert_eq!(mesh.indices().map(|i| i.len()), Some(6), "quad → 2 tris");
+    }
+
+    #[test]
+    fn dense_small_triangles_get_valid_fallback_normals() {
+        // Bevy's angle-weighted normal generator rejects triangles when the
+        // product of two squared edge lengths is <= f32::EPSILON. Dense USD
+        // assets routinely contain valid triangles below that absolute scale.
+        let m = mesh(
+            vec![[0., 0., 0.], [0.001, 0., 0.], [0., 0.001, 0.]],
+            vec![3],
+            vec![0, 1, 2],
+        );
+        let mesh = mesh_from_usd(&m);
+        let Some(VertexAttributeValues::Float32x3(normals)) =
+            mesh.attribute(Mesh::ATTRIBUTE_NORMAL)
+        else {
+            panic!("normal attribute");
+        };
+        assert!(
+            normals
+                .iter()
+                .all(|normal| Vec3::from_array(*normal).length_squared() > 0.99),
+            "small valid triangles must not receive zero normals"
+        );
     }
 }

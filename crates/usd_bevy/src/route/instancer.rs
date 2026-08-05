@@ -21,6 +21,52 @@ use crate::read::xform::read_transform_at;
 use openusd::schemas::geom::PointInstancer;
 use openusd::sdf::Value;
 
+/// Prototype-source subtrees consumed by PointInstancers. They remain in the
+/// projected hierarchy for inspection, but must not render as ordinary scene
+/// geometry in addition to their instances.
+#[derive(Resource, Debug, Clone, Default, PartialEq, Eq)]
+pub struct PointInstancerPrototypeSources {
+    roots: Vec<String>,
+}
+
+impl PointInstancerPrototypeSources {
+    /// Whether `path` is a prototype relationship target or lies below one.
+    pub fn contains(&self, path: &str) -> bool {
+        self.roots.iter().any(|root| {
+            path == root
+                || path
+                    .strip_prefix(root)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        })
+    }
+}
+
+/// Refresh the composed PointInstancer prototype targets available to routes.
+/// Returns whether the set changed (which requires a full reconcile so former
+/// prototype sources become renderable and new ones are suppressed).
+pub(crate) fn refresh_prototype_sources(stage: &openusd::usd::Stage, world: &mut World) -> bool {
+    let mut roots = Vec::new();
+    let _ = stage.traverse(openusd::usd::PrimPredicate::ALL, |path| {
+        let prim = stage.prim(path.clone());
+        if !matches!(prim.type_name(), Ok(Some(t)) if t.as_str() == "PointInstancer") {
+            return;
+        }
+        roots.extend(
+            prim.relationship("prototypes")
+                .targets()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|target| target.prim_path().as_str().to_string()),
+        );
+    });
+    roots.sort();
+    roots.dedup();
+    let next = PointInstancerPrototypeSources { roots };
+    let changed = world.get_resource::<PointInstancerPrototypeSources>() != Some(&next);
+    world.insert_resource(next);
+    changed
+}
+
 /// Stable instance IDs marked invisible via the schema's `invisibleIds`.
 fn invisible_ids(ctx: &RouteCtx) -> bevy::platform::collections::HashSet<i64> {
     let mut set = bevy::platform::collections::HashSet::default();
@@ -179,6 +225,26 @@ impl PrimRoute for PointInstancerRoute {
                     spawned.push(e.id());
                 }
             }
+        }
+    }
+
+    fn patch(&self, ctx: &RouteCtx, world: &mut World, entity: Entity, changed: &[&str]) {
+        let touches_instances = changed.is_empty()
+            || changed.iter().any(|property| {
+                matches!(
+                    *property,
+                    "prototypes"
+                        | "positions"
+                        | "protoIndices"
+                        | "orientations"
+                        | "orientationsf"
+                        | "scales"
+                        | "ids"
+                        | "invisibleIds"
+                )
+            });
+        if touches_instances {
+            self.project(ctx, world, entity);
         }
     }
 }
@@ -471,6 +537,38 @@ mod tests {
             world.get::<Transform>(prototype_root).unwrap().translation,
             Vec3::new(1.0, 2.0, 3.0),
             "prototype-root transform is preserved"
+        );
+
+        let source_root = map.entity("/PI/Prototypes/Chair").unwrap();
+        assert_eq!(
+            world.get::<Visibility>(source_root),
+            Some(&Visibility::Hidden),
+            "prototype source subtree is hidden outside the instancer"
+        );
+        let source_mesh = map.entity("/PI/Prototypes/Chair/Geo").unwrap();
+        assert!(
+            world.get::<Mesh3d>(source_mesh).is_none(),
+            "prototype source mesh is not also attached as scene geometry"
+        );
+
+        let registry = SchemaRegistry::builtin();
+        let point_instancer_path = openusd::sdf::path("/PI").unwrap();
+        registry.patch_prim(
+            &live.stage,
+            &point_instancer_path,
+            &mut world,
+            instancer,
+            &["purpose"],
+        );
+        let after_purpose_patch: Vec<Entity> = world
+            .get::<Children>(instancer)
+            .unwrap()
+            .iter()
+            .filter(|entity| world.get::<UsdInstance>(*entity).is_some())
+            .collect();
+        assert_eq!(
+            after_purpose_patch, instances,
+            "an unrelated purpose patch must not rebuild PointInstancer children"
         );
     }
 

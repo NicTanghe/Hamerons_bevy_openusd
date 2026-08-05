@@ -37,7 +37,10 @@ fn resolve(ctx: &RouteCtx, world: &World) -> (Visibility, String) {
         read_visibility(ctx.stage, ctx.path),
         Ok(VisibilityState::Invisible)
     );
-    let hidden = invisible || !purposes.shows(&purpose);
+    let prototype_source = world
+        .get_resource::<super::instancer::PointInstancerPrototypeSources>()
+        .is_some_and(|sources| sources.contains(ctx.prim_str()));
+    let hidden = prototype_source || invisible || !purposes.shows(&purpose);
     let vis = if hidden {
         Visibility::Hidden
     } else {
@@ -82,6 +85,19 @@ pub struct MeshRoute;
 impl MeshRoute {
     /// Bake + attach; returns whether a `Mesh3d` was inserted.
     fn attach(&self, ctx: &RouteCtx, world: &mut World, entity: Entity) -> bool {
+        let prototype_source = world
+            .get_resource::<super::instancer::PointInstancerPrototypeSources>()
+            .is_some_and(|sources| sources.contains(ctx.prim_str()));
+        if prototype_source {
+            // This mesh is source data for a PointInstancer. The instancer
+            // route bakes it once and shares that handle across instances;
+            // attaching it here would draw an extra copy at the source path.
+            if let Ok(mut e) = world.get_entity_mut(entity) {
+                e.remove::<Mesh3d>();
+                e.remove::<MeshMaterial3d<StandardMaterial>>();
+            }
+            return false;
+        }
         let Ok(Some(read)) = read_mesh(ctx.stage, ctx.path) else {
             return false;
         };
@@ -126,8 +142,24 @@ impl PrimRoute for MeshRoute {
         self.attach(ctx, world, entity);
     }
 
-    // patch falls back to project (rebuild the mesh). Mesh topology changes
-    // arrive via `resynced` in practice, so this is rarely hit on changed_info.
+    fn patch(&self, ctx: &RouteCtx, world: &mut World, entity: Entity, changed: &[&str]) {
+        let touches_geometry = changed.is_empty()
+            || changed.iter().any(|property| {
+                matches!(
+                    *property,
+                    "points"
+                        | "faceVertexCounts"
+                        | "faceVertexIndices"
+                        | "normals"
+                        | "orientation"
+                        | "subdivisionScheme"
+                        | "doubleSided"
+                ) || property.starts_with("primvars:")
+            });
+        if touches_geometry {
+            self.attach(ctx, world, entity);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -206,5 +238,56 @@ mod purpose_tests {
         assert!(!hidden(&world, &map, "/Render"), "render shown when toggled on");
         assert!(hidden(&world, &map, "/Proxy"), "proxy hidden when toggled off");
         assert!(!hidden(&world, &map, "/Plain"), "default always shown");
+    }
+
+    #[test]
+    fn purpose_patch_does_not_rebuild_mesh_assets() {
+        let stage = Stage::builder().in_memory("mesh-purpose.usda").unwrap();
+        stage
+            .define_prim("/Mesh")
+            .unwrap()
+            .set_type_name("Mesh")
+            .unwrap();
+        stage
+            .create_attribute("/Mesh.points", "point3f[]")
+            .unwrap()
+            .set(openusd::sdf::Value::Vec3fVec(vec![
+                [0.0, 0.0, 0.0].into(),
+                [1.0, 0.0, 0.0].into(),
+                [0.0, 1.0, 0.0].into(),
+            ]))
+            .unwrap();
+        stage
+            .create_attribute("/Mesh.faceVertexCounts", "int[]")
+            .unwrap()
+            .set(openusd::sdf::Value::IntVec(vec![3]))
+            .unwrap();
+        stage
+            .create_attribute("/Mesh.faceVertexIndices", "int[]")
+            .unwrap()
+            .set(openusd::sdf::Value::IntVec(vec![0, 1, 2]))
+            .unwrap();
+
+        let live = LiveStage::new(stage);
+        let mut world = World::new();
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(Assets::<StandardMaterial>::default());
+        world.insert_resource(SchemaRegistry::builtin());
+        let mut map = PrimEntities::default();
+        project_stage(&mut world, &live, &mut map);
+
+        let entity = map.entity("/Mesh").unwrap();
+        let before_handle = world.get::<Mesh3d>(entity).unwrap().0.clone();
+        let before_count = world.resource::<Assets<Mesh>>().len();
+        let registry = SchemaRegistry::builtin();
+        registry.patch_prim(
+            &live.stage,
+            &openusd::sdf::path("/Mesh").unwrap(),
+            &mut world,
+            entity,
+            &["purpose"],
+        );
+        assert_eq!(world.get::<Mesh3d>(entity).unwrap().0, before_handle);
+        assert_eq!(world.resource::<Assets<Mesh>>().len(), before_count);
     }
 }
