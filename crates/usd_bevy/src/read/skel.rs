@@ -234,12 +234,12 @@ pub fn skinned_points_at(
 
     // Fast path: skip prims whose `jointIndices`/`jointWeights` are absent or
     // disagree in length (some assets, e.g. Hummingbird, author them
-    // inconsistently). openusd now *returns an error* for this rather than
-    // panicking, but bailing here avoids building the resolver at all and keeps
-    // the log quiet in the common case.
-    let n_indices = read_int_vec(stage, mesh_path, "primvars:skel:jointIndices")
-        .map(|v| v.len())
-        .unwrap_or(0);
+    // inconsistently). `openusd`'s low-level skinning API asserts its input
+    // invariants, so validate them here and keep malformed assets from taking
+    // down the viewer.
+    let joint_indices =
+        read_int_vec(stage, mesh_path, "primvars:skel:jointIndices").unwrap_or_default();
+    let n_indices = joint_indices.len();
     let n_weights = read_float_vec(stage, mesh_path, "primvars:skel:jointWeights")
         .map(|v| v.len())
         .unwrap_or(0);
@@ -294,18 +294,31 @@ pub fn skinned_points_at(
     // Canonical UsdSkel order: morph blend shapes first, then skin the result.
     let rest = blend_shape_deform(stage, mesh_path, &mesh.points, time).unwrap_or(mesh.points);
     let pts: Vec<gf::Vec3f> = rest.iter().map(|p| gf::Vec3f::from(*p)).collect();
-    // openusd validates the influence data and returns an error (rather than
-    // panicking) on anything inconsistent; fall back to the un-skinned mesh.
-    match skinning.compute_skinned_points(&pts, &skel_xforms) {
-        Ok(d) => Ok(Some(d.into_iter().map(|v| [v.x, v.y, v.z]).collect())),
-        Err(e) => {
-            log::warn!(
-                "usd_bevy::skel: {}: skinning failed ({e}) — showing the mesh un-skinned",
-                mesh_path.as_str()
-            );
-            Ok(None)
-        }
+
+    let influences_per_point = skinning.num_influences_per_component();
+    let expected_influences = pts.len().checked_mul(influences_per_point);
+    let invalid_joint = joint_indices
+        .iter()
+        .copied()
+        .find(|&joint| joint < 0 || joint as usize >= skinning.joint_order_len());
+    if expected_influences != Some(n_indices) || invalid_joint.is_some() {
+        log::warn!(
+            "usd_bevy::skel: {}: invalid skinning influences (points={}, influences={}, \
+             influences-per-point={}, joint-order={}, invalid-joint={invalid_joint:?}) — \
+             showing the mesh un-skinned",
+            mesh_path.as_str(),
+            pts.len(),
+            n_indices,
+            influences_per_point,
+            skinning.joint_order_len(),
+        );
+        return Ok(None);
     }
+
+    let deformed = skinning.compute_skinned_points(&pts, &skel_xforms);
+    Ok(Some(
+        deformed.into_iter().map(|v| [v.x, v.y, v.z]).collect(),
+    ))
 }
 
 #[cfg(test)]
