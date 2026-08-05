@@ -3354,15 +3354,6 @@ dependencies = [
 
 [[package]]
 name = "lz4_flex"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ef0d4ed8669f8f8826eb00dc878084aa8f253506c4fd5e8f58f5bce72ddb97e"
-dependencies = [
- "twox-hash",
-]
-
-[[package]]
-name = "lz4_flex"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ecbdfe44b1bd960b68170b417450a628c43f7cf56bb3c5317e61cb230ee7f226"
@@ -3973,24 +3964,6 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "openusd"
-version = "0.5.0"
-source = "git+https://github.com/mxpv/openusd?rev=7934d9f3a375fabc93c14dc96b7900cbd035204d#7934d9f3a375fabc93c14dc96b7900cbd035204d"
-dependencies = [
- "anyhow",
- "bitflags 2.11.1",
- "bytemuck",
- "derive_more",
- "half",
- "logos",
- "lz4_flex 0.13.1",
- "num-traits",
- "strum",
- "thiserror 2.0.18",
- "zip",
-]
-
-[[package]]
-name = "openusd"
 version = "0.6.0"
 source = "git+https://github.com/mxpv/openusd#c274fd636658c902ba260671e9eaa62943c24959"
 dependencies = [
@@ -4000,7 +3973,7 @@ dependencies = [
  "derive_more",
  "half",
  "logos",
- "lz4_flex 0.14.0",
+ "lz4_flex",
  "num-traits",
  "regex-lite",
  "strum",
@@ -5399,7 +5372,7 @@ dependencies = [
  "bevy",
  "glam 0.30.10",
  "log",
- "openusd 0.5.0",
+ "openusd",
  "usd_macro",
 ]
 
@@ -5407,7 +5380,7 @@ dependencies = [
 name = "usd_macro"
 version = "0.0.1"
 dependencies = [
- "openusd 0.5.0",
+ "openusd",
  "proc-macro2",
  "quote",
  "syn",
@@ -5421,7 +5394,7 @@ dependencies = [
  "eframe",
  "egui-wgpu",
  "mara",
- "openusd 0.6.0",
+ "openusd",
  "rfd",
  "tracing",
  "tracing-subscriber",

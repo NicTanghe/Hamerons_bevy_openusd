@@ -14,6 +14,5 @@ proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
 # Used at macro-expansion time to validate the usda body (compile-time errors
-# on malformed USD). The workspace `[patch]` redirects this to the local
-# checkout, same as everywhere else.
-openusd = { git = "https://github.com/mxpv/openusd", rev = "7934d9f3a375fabc93c14dc96b7900cbd035204d" }
+# on malformed USD).
+openusd = { git = "https://github.com/mxpv/openusd" }
