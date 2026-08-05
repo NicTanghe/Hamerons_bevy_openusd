@@ -14,6 +14,7 @@ anyhow = "1"
 log = "0.4"
 bevy = { version = "0.19", default-features = false, features = [
     "std",
+    "multi_threaded",
     "bevy_asset",
     "bevy_log",
     "bevy_render",

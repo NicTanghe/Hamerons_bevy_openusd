@@ -23,7 +23,7 @@ pub use route::{DisplayPurposes, PrimRoute, RouteCtx, SchemaRegistry};
 /// The inline-USD macro (see [`snippet::UsdSnippet`]).
 pub use usd_macro::usd;
 
-use bevy::app::{App, Plugin};
+use bevy::app::{App, Plugin, Update};
 
 /// Registers the [`UsdPrimRef`] reflect type and installs the built-in
 /// [`SchemaRegistry`] (transform / visibility / mesh / reflect routes). Pair
@@ -43,6 +43,9 @@ impl Plugin for UsdPlugin {
         }
         // Intern projected meshes so identical prims share one GPU asset (6d).
         app.init_resource::<route::cache::ProjectionCache>();
+        // Native mesh bakes finish off-thread; attach a bounded number of
+        // completed assets each frame so the UI stays responsive.
+        app.add_systems(Update, route::cache::apply_completed_usd_meshes);
         // Which USD `purpose` classes are displayed (Phase A). Default: show
         // proxy, hide render + guide.
         app.init_resource::<DisplayPurposes>();
