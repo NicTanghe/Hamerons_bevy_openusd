@@ -98,20 +98,37 @@ impl PrimRoute for MaterialRoute {
         };
         let assets = world.get_resource::<AssetServer>().cloned();
         let material = to_standard_material(&read, assets.as_ref());
-        let handle = world
-            .resource_mut::<Assets<StandardMaterial>>()
-            .add(material);
+        let handle =
+            super::cache::intern_preview_material(world, &read, assets.is_some(), material);
         if let Some(mut mat) = world.get_mut::<MeshMaterial3d<StandardMaterial>>(entity) {
             mat.0 = handle;
         } else if let Ok(mut e) = world.get_entity_mut(entity) {
             e.insert(MeshMaterial3d(handle));
         }
     }
+
+    fn patch(&self, ctx: &RouteCtx, world: &mut World, entity: Entity, changed: &[&str]) {
+        if changed.is_empty() || changed.iter().any(|name| material_property(name)) {
+            self.project(ctx, world, entity);
+        }
+    }
+}
+
+fn material_property(name: &str) -> bool {
+    name.starts_with("material:binding")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn material_patch_filter_ignores_purpose() {
+        assert!(!material_property("purpose"));
+        assert!(!material_property("points"));
+        assert!(material_property("material:binding"));
+        assert!(material_property("material:binding:preview"));
+    }
 
     #[test]
     fn opaque_material_maps_channels() {

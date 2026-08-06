@@ -117,13 +117,27 @@ impl MeshRoute {
             ctx.prim_str(),
             read.points.len()
         );
-        let mesh = crate::mesh::mesh_from_usd(&read);
-        let mesh_handle = super::cache::intern_mesh(world, mesh);
-        let material = world
-            .resource_mut::<Assets<StandardMaterial>>()
-            .add(StandardMaterial::default());
+        let availability = super::cache::request_usd_mesh(world, entity, ctx.prim_str(), read);
+        let needs_material = world
+            .get::<MeshMaterial3d<StandardMaterial>>(entity)
+            .is_none();
+        let has_asset_server = world.get_resource::<AssetServer>().is_some();
+        let material = needs_material.then(|| {
+            let read = crate::read::shade::ReadPreviewMaterial::default();
+            super::cache::intern_preview_material(
+                world,
+                &read,
+                has_asset_server,
+                StandardMaterial::default(),
+            )
+        });
         if let Ok(mut e) = world.get_entity_mut(entity) {
-            e.insert((Mesh3d(mesh_handle), MeshMaterial3d(material)));
+            if let super::cache::MeshAvailability::Ready(mesh_handle) = availability {
+                e.insert(Mesh3d(mesh_handle));
+            }
+            if let Some(material) = material {
+                e.insert(MeshMaterial3d(material));
+            }
             return true;
         }
         false
@@ -143,23 +157,23 @@ impl PrimRoute for MeshRoute {
     }
 
     fn patch(&self, ctx: &RouteCtx, world: &mut World, entity: Entity, changed: &[&str]) {
-        let touches_geometry = changed.is_empty()
-            || changed.iter().any(|property| {
-                matches!(
-                    *property,
-                    "points"
-                        | "faceVertexCounts"
-                        | "faceVertexIndices"
-                        | "normals"
-                        | "orientation"
-                        | "subdivisionScheme"
-                        | "doubleSided"
-                ) || property.starts_with("primvars:")
-            });
-        if touches_geometry {
+        if changed.is_empty() || changed.iter().any(|name| mesh_property(name)) {
             self.attach(ctx, world, entity);
         }
     }
+}
+
+fn mesh_property(name: &str) -> bool {
+    matches!(
+        name,
+        "points"
+            | "faceVertexCounts"
+            | "faceVertexIndices"
+            | "orientation"
+            | "normals"
+            | "subdivisionScheme"
+            | "doubleSided"
+    ) || name.starts_with("primvars:")
 }
 
 #[cfg(test)]
@@ -168,6 +182,18 @@ mod purpose_tests {
     use crate::live::{LiveStage, PrimEntities, project_stage};
     use crate::route::{DisplayPurposes, SchemaRegistry};
     use openusd::usd::Stage;
+
+    #[test]
+    fn mesh_patch_ignores_purpose_and_accepts_geometry_properties() {
+        assert!(!mesh_property("purpose"));
+        assert!(!mesh_property("visibility"));
+        assert!(mesh_property("points"));
+        assert!(mesh_property("faceVertexIndices"));
+        assert!(mesh_property("doubleSided"));
+        assert!(mesh_property("primvars:st:indices"));
+        assert!(mesh_property("primvars:displayColor"));
+        assert!(mesh_property("primvars:customData"));
+    }
 
     fn purpose_stage() -> Stage {
         let stage = Stage::builder().in_memory("purpose.usda").unwrap();
