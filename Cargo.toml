@@ -19,7 +19,7 @@ path = "src/main.rs"
 # The live USD editor: stage projection, sync, authoring, persistence.
 usd_bevy = { path = "crates/usd_bevy" }
 # Pure-Rust USD — the viewer opens the live `Stage` directly.
-openusd = { git = "https://github.com/mxpv/openusd", rev = "7934d9f3a375fabc93c14dc96b7900cbd035204d", features = ["geom", "shade"] }
+openusd = { git = "https://github.com/mxpv/openusd", features = ["geom", "shade"] }
 
 # mara — the egui UI host (window + ribbons/panes) embedding a Bevy viewport.
 mara = { path = "../mara/mara", default-features = false, features = ["window", "bevy"] }
@@ -51,7 +51,3 @@ eframe = { version = "0.34", default-features = false, features = ["default_font
 wgpu = { version = "29", default-features = false, features = ["vulkan"] }
 egui-wgpu = { version = "0.34", default-features = false, features = ["winit"] }
 
-# Use the local openusd checkout (carries the USDZ `.usd`-layer content-sniff
-# fix, so Kitchen_set.usdz and friends load). Drop once the fix is upstream.
-[patch."https://github.com/mxpv/openusd"]
-openusd = { path = "../openusd" }
