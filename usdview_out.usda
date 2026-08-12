@@ -1,0 +1,10 @@
+#usda 1.0
+(
+    framesPerSecond = 24.0
+    timeCodesPerSecond = 24.0
+    metersPerUnit = 1.0
+    subLayers = [@./stage/graftstages4.usd@]
+    startTimeCode = 107.0
+    endTimeCode = 107.0
+    upAxis = "Y"
+)

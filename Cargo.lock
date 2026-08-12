@@ -3364,6 +3364,7 @@ dependencies = [
 [[package]]
 name = "mara"
 version = "0.4.1"
+source = "git+https://github.com/bresilla/mara.git#3e8790a8bc5662dbe917875a789692e77ce32dde"
 dependencies = [
  "egui",
  "egui-wgpu",
@@ -3378,6 +3379,7 @@ dependencies = [
 [[package]]
 name = "mara_bevy"
 version = "0.4.1"
+source = "git+https://github.com/bresilla/mara.git#3e8790a8bc5662dbe917875a789692e77ce32dde"
 dependencies = [
  "bevy",
  "crossbeam-channel",
@@ -3390,6 +3392,7 @@ dependencies = [
 [[package]]
 name = "mara_code"
 version = "0.4.1"
+source = "git+https://github.com/bresilla/mara.git#3e8790a8bc5662dbe917875a789692e77ce32dde"
 dependencies = [
  "egui",
 ]
@@ -3397,6 +3400,7 @@ dependencies = [
 [[package]]
 name = "mara_core"
 version = "0.4.1"
+source = "git+https://github.com/bresilla/mara.git#3e8790a8bc5662dbe917875a789692e77ce32dde"
 dependencies = [
  "egui",
  "iconflow",
@@ -3408,6 +3412,7 @@ dependencies = [
 [[package]]
 name = "mara_graph"
 version = "0.4.1"
+source = "git+https://github.com/bresilla/mara.git#3e8790a8bc5662dbe917875a789692e77ce32dde"
 dependencies = [
  "egui",
  "egui-scale",
@@ -3960,6 +3965,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "openusd"
 version = "0.6.0"
+source = "git+https://github.com/mxpv/openusd#c274fd636658c902ba260671e9eaa62943c24959"
 dependencies = [
  "anyhow",
  "bitflags 2.11.1",

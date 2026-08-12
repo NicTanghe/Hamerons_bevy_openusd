@@ -325,6 +325,7 @@ fn registry_of(world: &World) -> SchemaRegistry {
 /// empty world — call once on load.
 pub fn project_stage(world: &mut World, live: &LiveStage, map: &mut PrimEntities) {
     let stage = &live.stage;
+    crate::route::instancer::refresh_prototype_sources(stage, world);
     let registry = registry_of(world);
     // The stage-root entity (the pseudo-root `/`) carries the up-axis rotation;
     // every top-level prim hangs off it, so Bevy's transform propagation
@@ -388,7 +389,9 @@ pub fn apply_changes(world: &mut World, live: &LiveStage, map: &mut PrimEntities
     if changes.is_empty() {
         return;
     }
-    if changes.iter().any(|c| !c.resynced.is_empty()) {
+    let prototype_sources_changed =
+        crate::route::instancer::refresh_prototype_sources(&live.stage, world);
+    if prototype_sources_changed || changes.iter().any(|c| !c.resynced.is_empty()) {
         reconcile(world, live, map);
         return;
     }
