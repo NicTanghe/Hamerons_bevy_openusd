@@ -31,7 +31,12 @@ pub(super) fn root_module(
          \x20   values: array<vec4f, 64>,\n\
          }\n\
          @group(constants::MATERIAL_BIND_GROUP) @binding(0)\n\
-         var<uniform> materialx: MaterialXUniforms;\n",
+         var<uniform> materialx: MaterialXUniforms;\n\
+         struct MaterialXRendererParams {\n\
+         \x20   thickness: f32,\n\
+         }\n\
+         @group(constants::MATERIAL_BIND_GROUP) @binding(9)\n\
+         var<uniform> materialx_renderer: MaterialXRendererParams;\n",
     );
     let texture_count = graph_lines
         .iter()
@@ -124,7 +129,11 @@ pub(super) fn external_root_module(compiled: &CompiledMaterial, uses_normal: boo
          \x20   forward_io::{VertexOutput, FragmentOutput},\n\
          \x20   pbr_fragment::pbr_input_from_vertex_output,\n\
          \x20   pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing},\n\
-         \x20   pbr_types::STANDARD_MATERIAL_FLAGS_ALPHA_MODE_BLEND,\n\
+         \x20   pbr_types::{\n\
+         \x20       STANDARD_MATERIAL_FLAGS_ALPHA_MODE_BLEND,\n\
+         \x20       STANDARD_MATERIAL_FLAGS_ATTENUATION_ENABLED_BIT,\n\
+         \x20   },\n\
+         \x20   mesh_functions::get_world_from_local,\n\
          };\n",
     );
     source.push_str(&compiled.root_wesl);
@@ -133,7 +142,12 @@ pub(super) fn external_root_module(compiled: &CompiledMaterial, uses_normal: boo
          \x20   values: array<vec4f, 64>,\n\
          }\n\
          @group(constants::MATERIAL_BIND_GROUP) @binding(0)\n\
-         var<uniform> materialx: MaterialXUniforms;\n",
+         var<uniform> materialx: MaterialXUniforms;\n\
+         struct MaterialXRendererParams {\n\
+         \x20   thickness: f32,\n\
+         }\n\
+         @group(constants::MATERIAL_BIND_GROUP) @binding(9)\n\
+         var<uniform> materialx_renderer: MaterialXRendererParams;\n",
     );
     for index in 0..compiled.textures.len() {
         let texture_binding = 1 + index * 2;
@@ -199,6 +213,41 @@ pub(super) fn external_root_module(compiled: &CompiledMaterial, uses_normal: boo
     }
     if uses_normal {
         source.push_str("    pbr_input.N = normalize(mx.normal);\n");
+    }
+    if compiled.features.transmission {
+        source.push_str(
+            "    // MaterialX transmission is a dielectric closure, not alpha opacity.\n\
+             \x20   let materialx_transmission = clamp(mx.transmission.weight, 0.0, 1.0) * (1.0 - clamp(mx.metalness, 0.0, 1.0));\n\
+             \x20   let materialx_ior = max(mx.transmission.ior, 1.0);\n\
+             \x20   let materialx_transmission_roughness = sqrt(clamp(max(mx.transmission.roughness.x, mx.transmission.roughness.y), 0.0, 1.0));\n\
+             \x20   let materialx_f0_sqrt = abs((materialx_ior - 1.0) / (materialx_ior + 1.0));\n\
+             \x20   pbr_input.material.base_color = vec4f(\n\
+             \x20       mix(mx.base_color, max(mx.transmission.color, vec3f(0.0)), materialx_transmission),\n\
+             \x20       mx.opacity,\n\
+             \x20   );\n\
+             \x20   pbr_input.material.specular_transmission = materialx_transmission;\n\
+             \x20   pbr_input.material.perceptual_roughness = mix(\n\
+             \x20       clamp(mx.specular_roughness, 0.0, 1.0),\n\
+             \x20       materialx_transmission_roughness,\n\
+             \x20       materialx_transmission,\n\
+             \x20   );\n\
+             \x20   pbr_input.material.ior = materialx_ior;\n\
+             \x20   pbr_input.material.reflectance = vec3f(clamp(materialx_f0_sqrt / 0.4, 0.0, 1.0));\n\
+             \x20   let materialx_world_from_local = get_world_from_local(in.instance_index);\n\
+             \x20   let materialx_thickness_scale = length(\n\
+             \x20       (transpose(materialx_world_from_local) * vec4f(pbr_input.N, 0.0)).xyz,\n\
+             \x20   );\n\
+             \x20   pbr_input.material.thickness = select(\n\
+             \x20       materialx_renderer.thickness * materialx_thickness_scale,\n\
+             \x20       0.0,\n\
+             \x20       mx.thin_walled,\n\
+             \x20   );\n\
+             \x20   pbr_input.material.attenuation_distance = max(mx.transmission.depth, 0.0);\n\
+             \x20   pbr_input.material.attenuation_color = vec4f(max(mx.transmission.color, vec3f(0.0)), 1.0);\n\
+             \x20   if mx.transmission.depth > 0.0 {\n\
+             \x20       pbr_input.material.flags = pbr_input.material.flags | STANDARD_MATERIAL_FLAGS_ATTENUATION_ENABLED_BIT;\n\
+             \x20   }\n",
+        );
     }
     source.push_str(
         "    var out: FragmentOutput;\n\

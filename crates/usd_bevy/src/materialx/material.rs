@@ -14,12 +14,14 @@ use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey};
 use bevy::platform::hash::FixedHasher;
 use bevy::prelude::*;
 use bevy::render::render_resource::{
-    AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError,
+    AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
 };
 use bevy::shader::Shader;
+#[cfg(not(target_arch = "wasm32"))]
+use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 
 use super::compiler::{CompiledMaterialX, CompiledTexture, MAX_TEXTURES, MAX_UNIFORMS};
-use super::diagnostic::{DiagnosticCode, MaterialXDiagnostic};
+use super::diagnostic::{DiagnosticCode, MaterialXDiagnostic, MaterialXDiagnostics};
 use super::registry::MaterialXRegistry;
 
 const MODULE_UUID_PREFIX: u128 = 0x4d58_5745_534c_4d4f_0000_0000_0000_0000;
@@ -28,6 +30,32 @@ const GRAPH_UUID_PREFIX: u128 = 0x4d58_4752_4150_4853_0000_0000_0000_0000;
 /// Strong handles for synchronously decoded USD-resolved texture files.
 #[derive(Resource, Default)]
 pub struct MaterialXTextureCache(HashMap<CompiledTexture, Handle<Image>>);
+
+/// Native texture reads and decodes that are still running off the UI thread.
+///
+/// This is a separate opt-in resource so small bare test worlds retain the
+/// deterministic synchronous path. [`crate::UsdPlugin`] installs it in the
+/// real application.
+#[derive(Resource, Default)]
+pub struct MaterialXPendingTextures {
+    #[cfg(not(target_arch = "wasm32"))]
+    pending: HashMap<CompiledTexture, PendingTexture>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct PendingTexture {
+    task: Task<Result<Image, String>>,
+    handle: Handle<Image>,
+    material: String,
+}
+
+/// Renderer-owned geometry parameters that MaterialX deliberately does not
+/// author. `thickness` is a local-space closed-mesh estimate; the generated
+/// shader applies the instance's world scale before Bevy traces refraction.
+#[derive(Debug, Clone, Copy, ShaderType)]
+pub struct MaterialXRendererParams {
+    pub thickness: f32,
+}
 
 /// Fixed host resource layout for the first MaterialX slice.
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
@@ -47,20 +75,25 @@ pub struct MaterialXMaterial {
     #[texture(7)]
     #[sampler(8)]
     pub texture_3: Option<Handle<Image>>,
+    #[uniform(9)]
+    pub renderer: MaterialXRendererParams,
     pub graph_key: u64,
     pub alpha_mode: AlphaMode,
+    pub transmission: bool,
 }
 
 #[repr(C)]
 #[derive(Eq, PartialEq, Hash, Copy, Clone)]
 pub struct MaterialXPipelineKey {
     graph_key: u64,
+    transmission: bool,
 }
 
 impl From<&MaterialXMaterial> for MaterialXPipelineKey {
     fn from(material: &MaterialXMaterial) -> Self {
         Self {
             graph_key: material.graph_key,
+            transmission: material.transmission,
         }
     }
 }
@@ -74,6 +107,10 @@ impl Material for MaterialXMaterial {
         false
     }
 
+    fn reads_view_transmission_texture(&self) -> bool {
+        self.transmission
+    }
+
     fn specialize(
         _pipeline: &MaterialPipeline,
         descriptor: &mut RenderPipelineDescriptor,
@@ -82,6 +119,14 @@ impl Material for MaterialXMaterial {
     ) -> Result<(), SpecializedMeshPipelineError> {
         if let Some(fragment) = descriptor.fragment.as_mut() {
             fragment.shader = graph_shader_handle(key.bind_group_data.graph_key);
+            if key.bind_group_data.transmission {
+                fragment
+                    .shader_defs
+                    .push("STANDARD_MATERIAL_SPECULAR_TRANSMISSION".into());
+                fragment
+                    .shader_defs
+                    .push("STANDARD_MATERIAL_DIFFUSE_OR_SPECULAR_TRANSMISSION".into());
+            }
         }
         Ok(())
     }
@@ -92,6 +137,7 @@ impl Material for MaterialXMaterial {
 pub fn prepare_material(
     world: &mut World,
     compiled: &CompiledMaterialX,
+    renderer_thickness: f32,
 ) -> Result<MaterialXMaterial, MaterialXDiagnostic> {
     register_shaders(world, compiled);
 
@@ -110,12 +156,16 @@ pub fn prepare_material(
         texture_1,
         texture_2,
         texture_3,
+        renderer: MaterialXRendererParams {
+            thickness: renderer_thickness,
+        },
         graph_key: compiled.graph_key,
         alpha_mode: if compiled.alpha_blend {
             AlphaMode::Blend
         } else {
             AlphaMode::Opaque
         },
+        transmission: compiled.transmission,
     })
 }
 
@@ -138,38 +188,33 @@ fn load_texture(
         ));
     }
 
-    let bytes = std::fs::read(&texture.path).map_err(|error| {
-        texture_error(
-            compiled,
-            &texture.path,
-            format!("cannot read texture: {error}"),
-        )
-    })?;
-    let extension = Path::new(&texture.path)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .ok_or_else(|| {
-            texture_error(
-                compiled,
-                &texture.path,
-                "texture has no usable file extension",
-            )
-        })?;
-    let image = Image::from_buffer(
-        &bytes,
-        ImageType::Extension(extension),
-        CompressedImageFormats::NONE,
-        texture.is_srgb,
-        texture_sampler(texture),
-        RenderAssetUsages::default(),
-    )
-    .map_err(|error| {
-        texture_error(
-            compiled,
-            &texture.path,
-            format!("cannot decode texture: {error}"),
-        )
-    })?;
+    #[cfg(not(target_arch = "wasm32"))]
+    if world.get_resource::<MaterialXPendingTextures>().is_some()
+        && let Some(pool) = AsyncComputeTaskPool::try_get()
+    {
+        let handle = world.resource::<Assets<Image>>().reserve_handle();
+        let owned_texture = texture.clone();
+        let task = pool.spawn(async move { decode_texture(&owned_texture) });
+        world
+            .resource_mut::<MaterialXTextureCache>()
+            .0
+            .insert(texture.clone(), handle.clone());
+        world
+            .resource_mut::<MaterialXPendingTextures>()
+            .pending
+            .insert(
+                texture.clone(),
+                PendingTexture {
+                    task,
+                    handle: handle.clone(),
+                    material: compiled.material.clone(),
+                },
+            );
+        return Ok(handle);
+    }
+
+    let image = decode_texture(texture)
+        .map_err(|message| texture_error(compiled, &texture.path, message))?;
     let handle = world.resource_mut::<Assets<Image>>().add(image);
     world
         .resource_mut::<MaterialXTextureCache>()
@@ -177,6 +222,100 @@ fn load_texture(
         .insert(texture.clone(), handle.clone());
     Ok(handle)
 }
+
+fn decode_texture(texture: &CompiledTexture) -> Result<Image, String> {
+    let bytes =
+        std::fs::read(&texture.path).map_err(|error| format!("cannot read texture: {error}"))?;
+    let extension = Path::new(&texture.path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .ok_or_else(|| "texture has no usable file extension".to_owned())?;
+    Image::from_buffer(
+        &bytes,
+        ImageType::Extension(extension),
+        CompressedImageFormats::NONE,
+        texture.is_srgb,
+        texture_sampler(texture),
+        RenderAssetUsages::default(),
+    )
+    .map_err(|error| format!("cannot decode texture: {error}"))
+}
+
+/// Publish a bounded number of completed MaterialX images each frame. Decode
+/// work stays off-thread; limiting uploads avoids replacing one long load stall
+/// with a single large GPU-upload frame.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn apply_completed_materialx_textures(world: &mut World) {
+    const MAX_COMPLETIONS_PER_FRAME: usize = 2;
+    if world.get_resource::<MaterialXPendingTextures>().is_none()
+        || world.get_resource::<Assets<Image>>().is_none()
+    {
+        return;
+    }
+
+    let keys = world
+        .resource::<MaterialXPendingTextures>()
+        .pending
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut completed = Vec::new();
+    for texture in keys {
+        if completed.len() >= MAX_COMPLETIONS_PER_FRAME {
+            break;
+        }
+        let ready = {
+            let mut pending = world.resource_mut::<MaterialXPendingTextures>();
+            let Some(entry) = pending.pending.get_mut(&texture) else {
+                continue;
+            };
+            block_on(poll_once(&mut entry.task))
+        };
+        if let Some(result) = ready {
+            let entry = world
+                .resource_mut::<MaterialXPendingTextures>()
+                .pending
+                .remove(&texture)
+                .expect("completed MaterialX texture remains registered");
+            completed.push((texture, entry.handle, entry.material, result));
+        }
+    }
+
+    for (texture, handle, material, result) in completed {
+        let image = match result {
+            Ok(image) => image,
+            Err(message) => {
+                let diagnostic = MaterialXDiagnostic::error(
+                    DiagnosticCode::MissingAsset,
+                    &material,
+                    None,
+                    Some(texture.path.clone()),
+                    message,
+                );
+                bevy::log::error!(target: "usd_bevy::materialx", "{diagnostic}");
+                if let Some(mut diagnostics) = world.get_resource_mut::<MaterialXDiagnostics>() {
+                    diagnostics.push(diagnostic);
+                }
+                let mut fallback = Image::default();
+                fallback.sampler = texture_sampler(&texture);
+                fallback
+            }
+        };
+        world
+            .resource_mut::<Assets<Image>>()
+            .insert(handle.id(), image)
+            .expect("reserved MaterialX image handle remains valid");
+        bevy::log::trace!(
+            target: "usd_bevy::materialx",
+            "{}: async texture ready",
+            texture.path
+        );
+    }
+}
+
+/// Web builds currently retain the synchronous image decode path.
+#[cfg(target_arch = "wasm32")]
+pub fn apply_completed_materialx_textures(_world: &mut World) {}
 
 fn texture_sampler(texture: &CompiledTexture) -> ImageSampler {
     let mut descriptor = ImageSamplerDescriptor::linear();

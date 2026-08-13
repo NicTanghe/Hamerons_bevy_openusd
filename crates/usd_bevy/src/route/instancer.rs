@@ -12,6 +12,7 @@
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
+use super::material::ResolvedMaterial;
 use super::{DisplayPurposes, PrimRoute, RouteCtx};
 use crate::read::geom::{
     ReadPointInstancer, VisibilityState, read_effective_purpose, read_point_instancer,
@@ -80,8 +81,8 @@ fn invisible_ids(ctx: &RouteCtx) -> bevy::platform::collections::HashSet<i64> {
     set
 }
 
-/// A baked prototype's shared render handles.
-type ProtoHandles = (Handle<Mesh>, Handle<StandardMaterial>);
+/// A baked prototype's shared mesh and resolved renderer material.
+type ProtoHandles = (Handle<Mesh>, ResolvedMaterial);
 
 /// One prim in a baked prototype subtree. `parent` indexes another entry in
 /// the same vector; entries are stored parent-before-child so they can be
@@ -220,7 +221,8 @@ impl PrimRoute for PointInstancerRoute {
                     let parent = node.parent.map(|p| spawned[p]).unwrap_or(instance);
                     let mut e = world.spawn((node.transform, node.visibility, ChildOf(parent)));
                     if let Some((mesh, material)) = node.render {
-                        e.insert((Mesh3d(mesh), MeshMaterial3d(material)));
+                        e.insert(Mesh3d(mesh));
+                        material.attach(&mut e);
                     }
                     spawned.push(e.id());
                 }
@@ -293,9 +295,9 @@ fn bake_prototype_node(
             );
             let mesh = crate::mesh::mesh_from_usd(&read);
             let mesh_handle = super::cache::intern_mesh(world, mesh);
-            let material = world
-                .resource_mut::<Assets<StandardMaterial>>()
-                .add(StandardMaterial::default());
+            let prototype_ctx = RouteCtx::at(ctx.stage, path, ctx.time);
+            let material = super::material::resolve_material(&prototype_ctx, world)
+                .unwrap_or_else(|| ResolvedMaterial::default_standard(world));
             (mesh_handle, material)
         });
 
@@ -324,7 +326,12 @@ fn bake_prototype_node(
 mod tests {
     use super::*;
     use crate::live::{LiveStage, PrimEntities, project_stage};
+    use crate::materialx::diagnostic::MaterialXDiagnostics;
+    use crate::materialx::external::MaterialXDocumentRegistry;
+    use crate::materialx::material::{MaterialXMaterial, MaterialXTextureCache};
+    use crate::materialx::registry::MaterialXRegistry;
     use crate::route::SchemaRegistry;
+    use bevy::shader::Shader;
     use openusd::schemas::geom::PointInstancer;
     use openusd::sdf::Value;
     use openusd::usd::Stage;
@@ -569,6 +576,106 @@ mod tests {
         assert_eq!(
             after_purpose_patch, instances,
             "an unrelated purpose patch must not rebuild PointInstancer children"
+        );
+    }
+
+    #[test]
+    fn open_chess_pawns_share_their_two_materialx_materials() {
+        let chess_set = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../assets/full_assets/OpenChessSet/chess_set.usda");
+        if !chess_set.is_file() {
+            eprintln!("skipping sibling OpenChessSet integration test");
+            return;
+        }
+        let stage = Stage::open(chess_set.to_str().unwrap()).unwrap();
+        let path = openusd::sdf::path("/ChessSet/Black/Pawns").unwrap();
+        let ctx = RouteCtx::new(&stage, &path);
+
+        let mut world = World::new();
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(Assets::<StandardMaterial>::default());
+        world.insert_resource(Assets::<MaterialXMaterial>::default());
+        world.insert_resource(Assets::<Shader>::default());
+        world.insert_resource(Assets::<Image>::default());
+        world.insert_resource(MaterialXRegistry::default());
+        world.insert_resource(MaterialXDocumentRegistry::default());
+        world.insert_resource(MaterialXDiagnostics::default());
+        world.insert_resource(MaterialXTextureCache::default());
+        world.insert_resource(DisplayPurposes {
+            render: true,
+            ..Default::default()
+        });
+
+        let instancer = world.spawn_empty().id();
+        PointInstancerRoute.project(&ctx, &mut world, instancer);
+
+        let instances: Vec<Entity> = world
+            .get::<Children>(instancer)
+            .unwrap()
+            .iter()
+            .filter(|entity| world.get::<UsdInstance>(*entity).is_some())
+            .collect();
+        assert_eq!(instances.len(), 8);
+
+        let mut body_handle = None;
+        let mut top_handle = None;
+        let mut rendered_meshes = 0;
+        for instance in instances {
+            let meshes = descendants_with_mesh(&world, instance);
+            assert_eq!(meshes.len(), 2, "each pawn has top and body meshes");
+            for mesh in meshes {
+                assert!(
+                    world
+                        .get::<MeshMaterial3d<StandardMaterial>>(mesh)
+                        .is_none(),
+                    "a bound prototype mesh must not retain the default material"
+                );
+                let handle = world
+                    .get::<MeshMaterial3d<MaterialXMaterial>>(mesh)
+                    .expect("the visible pawn mesh uses its resolved MaterialX material")
+                    .0
+                    .clone();
+                let transmission = world
+                    .resource::<Assets<MaterialXMaterial>>()
+                    .get(&handle)
+                    .unwrap()
+                    .transmission;
+                if transmission {
+                    assert!(
+                        world
+                            .resource::<Assets<MaterialXMaterial>>()
+                            .get(&handle)
+                            .unwrap()
+                            .renderer
+                            .thickness
+                            > 0.0,
+                        "the closed pawn top has renderer thickness for visible IOR refraction"
+                    );
+                }
+                let shared = if transmission {
+                    &mut top_handle
+                } else {
+                    &mut body_handle
+                };
+                if let Some(previous) = shared {
+                    assert_eq!(
+                        *previous, handle,
+                        "all eight instances share the baked material handle"
+                    );
+                } else {
+                    *shared = Some(handle);
+                }
+                rendered_meshes += 1;
+            }
+        }
+        assert_eq!(rendered_meshes, 16);
+        assert!(
+            top_handle.is_some(),
+            "the transmitted pawn top was preserved"
+        );
+        assert!(
+            body_handle.is_some(),
+            "the textured pawn body was preserved"
         );
     }
 

@@ -194,6 +194,7 @@ pub fn compile_external_materialx(
         uniforms,
         textures,
         alpha_blend: matches!(compiled.alpha_mode, materialx_wesl::AlphaMode::Blend),
+        transmission: compiled.features.transmission,
         required_modules: compiled
             .required_modules
             .iter()
@@ -346,20 +347,39 @@ mod tests {
     const FORWARD_IO: &str = r#"
 struct VertexOutput {
     @builtin(position) position: vec4f,
+    @location(3) world_position: vec4f,
     @location(0) world_normal: vec3f,
     @location(1) uv: vec2f,
     @location(2) world_tangent: vec4f,
+    @location(4) @interpolate(flat) instance_index: u32,
 }
 struct FragmentOutput { @location(0) color: vec4f, }
 "#;
+    const MESH_FUNCTIONS: &str = r#"
+fn get_world_from_local(instance_index: u32) -> mat4x4f {
+    return mat4x4f(
+        vec4f(1.0, 0.0, 0.0, 0.0),
+        vec4f(0.0, 1.0, 0.0, 0.0),
+        vec4f(0.0, 0.0, 1.0, 0.0),
+        vec4f(0.0, 0.0, 0.0, 1.0),
+    );
+}
+"#;
     const PBR_TYPES: &str = r#"
 const STANDARD_MATERIAL_FLAGS_ALPHA_MODE_BLEND: u32 = 2u << 29u;
+const STANDARD_MATERIAL_FLAGS_ATTENUATION_ENABLED_BIT: u32 = 1u << 13u;
 struct StandardMaterial {
     base_color: vec4f,
     metallic: f32,
     perceptual_roughness: f32,
     emissive: vec4f,
     flags: u32,
+    specular_transmission: f32,
+    thickness: f32,
+    ior: f32,
+    reflectance: vec3f,
+    attenuation_distance: f32,
+    attenuation_color: vec4f,
 }
 struct PbrInput {
     material: StandardMaterial,
@@ -372,7 +392,19 @@ import super::forward_io::VertexOutput;
 import super::pbr_types::{PbrInput, StandardMaterial};
 fn pbr_input_from_vertex_output(in: VertexOutput, is_front: bool, double_sided: bool) -> PbrInput {
     return PbrInput(
-        StandardMaterial(vec4f(1.0), 0.0, 0.5, vec4f(0.0, 0.0, 0.0, 1.0), 0u),
+        StandardMaterial(
+            vec4f(1.0),
+            0.0,
+            0.5,
+            vec4f(0.0, 0.0, 0.0, 1.0),
+            0u,
+            0.0,
+            0.0,
+            1.5,
+            vec3f(0.5),
+            0.0,
+            vec4f(1.0),
+        ),
         normalize(in.world_normal),
         normalize(in.world_normal),
     );
@@ -402,6 +434,7 @@ fn main_pass_post_lighting_processing(input: PbrInput, color: vec4f) -> vec4f {
             ("bevy_pbr::render::pbr_types", PBR_TYPES),
             ("bevy_pbr::render::pbr_fragment", PBR_FRAGMENT),
             ("bevy_pbr::render::pbr_functions", PBR_FUNCTIONS),
+            ("bevy_pbr::render::mesh_functions", MESH_FUNCTIONS),
         ] {
             resolver.add_module(module.parse().unwrap(), Cow::Borrowed(source));
         }
@@ -446,6 +479,39 @@ fn main_pass_post_lighting_processing(input: PbrInput, color: vec4f) -> vec4f {
                 .all(|texture| !texture.is_srgb)
         );
         assert!(compiled.wesl.contains("fn fragment("));
+        validate_wesl(&compiled, &registry.0);
+    }
+
+    #[test]
+    fn open_chess_pawn_top_preserves_transmission_closure_for_bevy() {
+        let document = FsPath::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../assets/full_assets/OpenChessSet/assets/Pawn/Pawn_mat.mtlx");
+        if !document.is_file() {
+            eprintln!("skipping sibling OpenChessSet integration test");
+            return;
+        }
+        let source = ExternalMaterialXSource {
+            document,
+            material_name: "M_Pawn_Top_B".into(),
+        };
+        let material = Path::new("/ChessSet/Black/Pawns/Pawn/Looks/M_Pawn_Top_B").unwrap();
+        let registry = MaterialXDocumentRegistry::default();
+        let compiled = compile_external_materialx(&source, &material, &registry).unwrap();
+
+        assert!(compiled.transmission);
+        assert!(!compiled.alpha_blend, "transmission is not alpha opacity");
+        assert!(compiled.wesl.contains("mx.transmission.weight"));
+        assert!(compiled.wesl.contains("mx.transmission.color"));
+        assert!(compiled.wesl.contains("specular_transmission"));
+        assert!(compiled.wesl.contains("materialx_renderer.thickness"));
+        assert!(compiled.wesl.contains("mx.thin_walled"));
+        assert!(compiled.wesl.contains("get_world_from_local"));
+        assert!(
+            compiled
+                .required_modules
+                .iter()
+                .any(|module| module == "pbrlib::mx_roughness_anisotropy")
+        );
         validate_wesl(&compiled, &registry.0);
     }
 }

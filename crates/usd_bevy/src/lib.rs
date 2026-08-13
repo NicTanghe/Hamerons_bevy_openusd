@@ -50,9 +50,14 @@ impl Plugin for UsdPlugin {
         app.init_resource::<materialx::external::MaterialXDocumentRegistry>();
         app.init_resource::<materialx::diagnostic::MaterialXDiagnostics>();
         app.init_resource::<materialx::material::MaterialXTextureCache>();
+        app.init_resource::<materialx::material::MaterialXPendingTextures>();
         // Native mesh bakes finish off-thread; attach a bounded number of
         // completed assets each frame so the UI stays responsive.
         app.add_systems(Update, route::cache::apply_completed_usd_meshes);
+        app.add_systems(
+            Update,
+            materialx::material::apply_completed_materialx_textures,
+        );
         // Which USD `purpose` classes are displayed (Phase A). Default: show
         // proxy, hide render + guide.
         app.init_resource::<DisplayPurposes>();

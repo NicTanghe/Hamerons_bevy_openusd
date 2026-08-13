@@ -9,6 +9,7 @@
 
 use bevy::prelude::*;
 use openusd::sdf::Path;
+use std::collections::HashMap;
 
 use super::{PrimRoute, RouteCtx};
 use crate::materialx::compiler::{CompileFailure, compile_materialx, has_materialx_terminal};
@@ -22,6 +23,55 @@ use crate::read::shade::{ReadPreviewMaterial, read_material_binding, read_previe
 
 /// Maps a bound Material → the entity's [`MeshMaterial3d`].
 pub struct MaterialRoute;
+
+/// The renderer material selected for one shaded mesh.
+///
+/// PointInstancers bake prototype meshes before their source prim entities are
+/// projected, so they use this same resolution path and share the resulting
+/// handle across every visible instance.
+#[derive(Clone)]
+pub(crate) enum RoutedMaterial {
+    Standard(Handle<StandardMaterial>),
+    MaterialX(Handle<MaterialXMaterial>),
+}
+
+/// A resolved renderer material plus any compiler failure that should remain
+/// inspectable on the entity using its visible magenta fallback.
+#[derive(Clone)]
+pub(crate) struct ResolvedMaterial {
+    material: RoutedMaterial,
+    failure: Option<MaterialXFailure>,
+}
+
+impl ResolvedMaterial {
+    pub(crate) fn default_standard(world: &mut World) -> Self {
+        let handle = world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        Self {
+            material: RoutedMaterial::Standard(handle),
+            failure: None,
+        }
+    }
+
+    pub(crate) fn attach(self, entity: &mut EntityWorldMut<'_>) {
+        match self.material {
+            RoutedMaterial::Standard(handle) => {
+                entity.remove::<MeshMaterial3d<MaterialXMaterial>>();
+                entity.insert(MeshMaterial3d(handle));
+            }
+            RoutedMaterial::MaterialX(handle) => {
+                entity.remove::<MeshMaterial3d<StandardMaterial>>();
+                entity.insert(MeshMaterial3d(handle));
+            }
+        }
+        if let Some(failure) = self.failure {
+            entity.insert(failure);
+        } else {
+            entity.remove::<MaterialXFailure>();
+        }
+    }
+}
 
 /// The prim's decoded preview material, if it has a binding that resolves.
 fn material_of(ctx: &RouteCtx, binding: &Path) -> Option<ReadPreviewMaterial> {
@@ -94,99 +144,132 @@ impl PrimRoute for MaterialRoute {
     }
 
     fn project(&self, ctx: &RouteCtx, world: &mut World, entity: Entity) {
-        // Only meaningful once the mesh route has given us something to shade;
-        // if there's no render Assets there's nothing to attach.
-        if world.get_resource::<Assets<StandardMaterial>>().is_none() {
+        // Prototype source meshes are intentionally not rendered directly. The
+        // PointInstancer resolves their materials while baking the shared
+        // visible subtree, so compiling again on the hidden source would only
+        // duplicate assets and diagnostics.
+        if world
+            .get_resource::<super::instancer::PointInstancerPrototypeSources>()
+            .is_some_and(|sources| sources.contains(ctx.prim_str()))
+            && world.get::<Mesh3d>(entity).is_none()
+        {
             return;
         }
-        let Some(binding) = read_material_binding(ctx.stage, ctx.path).ok().flatten() else {
+        let Some(material) = resolve_material(ctx, world) else {
             return;
         };
-        let registry = world
-            .get_resource::<MaterialXRegistry>()
-            .cloned()
-            .unwrap_or_default();
-        let materialx_result = if has_materialx_terminal(ctx.stage, &binding, &registry) {
-            Some(compile_materialx(ctx.stage, &binding, ctx.time, &registry))
-        } else {
-            match find_external_materialx(ctx.stage, &binding) {
-                Ok(Some(source)) => {
-                    let document_registry = world
-                        .get_resource::<MaterialXDocumentRegistry>()
-                        .cloned()
-                        .unwrap_or_default();
-                    Some(compile_external_materialx(
-                        &source,
-                        &binding,
-                        &document_registry,
-                    ))
-                }
-                Ok(None) => None,
-                Err(diagnostic) => Some(Err(CompileFailure {
-                    diagnostics: vec![diagnostic],
-                })),
-            }
-        };
-        if let Some(result) = materialx_result {
-            match result {
-                Ok(compiled) => {
-                    for diagnostic in &compiled.diagnostics {
-                        record_materialx_diagnostic(world, diagnostic.clone());
-                    }
-                    if world.get_resource::<Assets<MaterialXMaterial>>().is_none() {
-                        bevy::log::error!(
-                            target: "usd_bevy::materialx",
-                            "{}: MaterialXMaterial assets are unavailable; add UsdPlugin after Bevy's render plugins",
-                            binding.as_str()
-                        );
-                        return;
-                    }
-                    let material = match prepare_material(world, &compiled) {
-                        Ok(material) => material,
-                        Err(diagnostic) => {
-                            record_materialx_diagnostic(world, diagnostic.clone());
-                            attach_materialx_fallback(world, entity, vec![diagnostic]);
-                            return;
-                        }
-                    };
-                    let handle = world
-                        .resource_mut::<Assets<MaterialXMaterial>>()
-                        .add(material);
-                    if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
-                        entity_mut.remove::<MeshMaterial3d<StandardMaterial>>();
-                        entity_mut.remove::<MaterialXFailure>();
-                        entity_mut.insert(MeshMaterial3d(handle));
-                    }
-                }
-                Err(failure) => {
-                    for diagnostic in &failure.diagnostics {
-                        record_materialx_diagnostic(world, diagnostic.clone());
-                    }
-                    attach_materialx_fallback(world, entity, failure.diagnostics);
-                }
-            }
-            return;
-        }
-
-        let Some(read) = material_of(ctx, &binding) else {
-            return;
-        };
-        let assets = world.get_resource::<AssetServer>().cloned();
-        let material = to_standard_material(&read, assets.as_ref());
-        let handle =
-            super::cache::intern_preview_material(world, &read, assets.is_some(), material);
         if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
-            entity_mut.remove::<MeshMaterial3d<MaterialXMaterial>>();
-            entity_mut.remove::<MaterialXFailure>();
-            entity_mut.insert(MeshMaterial3d(handle));
+            material.attach(&mut entity_mut);
         }
     }
 
     fn patch(&self, ctx: &RouteCtx, world: &mut World, entity: Entity, changed: &[&str]) {
-        if changed.is_empty() || changed.iter().any(|name| material_property(name)) {
+        if changed.is_empty()
+            || changed
+                .iter()
+                .any(|name| material_property(name) || super::geom::mesh_property(name))
+        {
             self.project(ctx, world, entity);
         }
     }
+}
+
+/// Resolve a USD material binding into the exact renderer handle used by a
+/// normal mesh. Kept separate from entity attachment so PointInstancer
+/// prototypes follow the same Preview/MaterialX/fallback behavior.
+pub(crate) fn resolve_material(ctx: &RouteCtx, world: &mut World) -> Option<ResolvedMaterial> {
+    // If there are no render assets there is nothing to create or attach.
+    if world.get_resource::<Assets<StandardMaterial>>().is_none() {
+        return None;
+    }
+    let Some(binding) = read_material_binding(ctx.stage, ctx.path).ok().flatten() else {
+        return None;
+    };
+    let registry = world
+        .get_resource::<MaterialXRegistry>()
+        .cloned()
+        .unwrap_or_default();
+    let materialx_result = if has_materialx_terminal(ctx.stage, &binding, &registry) {
+        Some(compile_materialx(ctx.stage, &binding, ctx.time, &registry))
+    } else {
+        match find_external_materialx(ctx.stage, &binding) {
+            Ok(Some(source)) => {
+                let document_registry = world
+                    .get_resource::<MaterialXDocumentRegistry>()
+                    .cloned()
+                    .unwrap_or_default();
+                Some(compile_external_materialx(
+                    &source,
+                    &binding,
+                    &document_registry,
+                ))
+            }
+            Ok(None) => None,
+            Err(diagnostic) => Some(Err(CompileFailure {
+                diagnostics: vec![diagnostic],
+            })),
+        }
+    };
+    if let Some(result) = materialx_result {
+        match result {
+            Ok(compiled) => {
+                for diagnostic in &compiled.diagnostics {
+                    record_materialx_diagnostic(world, diagnostic.clone());
+                }
+                if world.get_resource::<Assets<MaterialXMaterial>>().is_none() {
+                    bevy::log::error!(
+                        target: "usd_bevy::materialx",
+                        "{}: MaterialXMaterial assets are unavailable; add UsdPlugin after Bevy's render plugins",
+                        binding.as_str()
+                    );
+                    return None;
+                }
+                let thickness = if compiled.transmission {
+                    read_materialx_mesh_thickness(ctx)
+                } else {
+                    0.0
+                };
+                if compiled.transmission {
+                    bevy::log::trace!(
+                        target: "usd_bevy::materialx",
+                        "{}: closed-mesh refraction thickness {thickness}",
+                        binding.as_str()
+                    );
+                }
+                let material = match prepare_material(world, &compiled, thickness) {
+                    Ok(material) => material,
+                    Err(diagnostic) => {
+                        record_materialx_diagnostic(world, diagnostic.clone());
+                        return Some(materialx_fallback(world, vec![diagnostic]));
+                    }
+                };
+                let handle = world
+                    .resource_mut::<Assets<MaterialXMaterial>>()
+                    .add(material);
+                return Some(ResolvedMaterial {
+                    material: RoutedMaterial::MaterialX(handle),
+                    failure: None,
+                });
+            }
+            Err(failure) => {
+                for diagnostic in &failure.diagnostics {
+                    record_materialx_diagnostic(world, diagnostic.clone());
+                }
+                return Some(materialx_fallback(world, failure.diagnostics));
+            }
+        }
+    }
+
+    let Some(read) = material_of(ctx, &binding) else {
+        return None;
+    };
+    let assets = world.get_resource::<AssetServer>().cloned();
+    let material = to_standard_material(&read, assets.as_ref());
+    let handle = super::cache::intern_preview_material(world, &read, assets.is_some(), material);
+    Some(ResolvedMaterial {
+        material: RoutedMaterial::Standard(handle),
+        failure: None,
+    })
 }
 
 fn record_materialx_diagnostic(
@@ -202,11 +285,10 @@ fn record_materialx_diagnostic(
     }
 }
 
-fn attach_materialx_fallback(
+fn materialx_fallback(
     world: &mut World,
-    entity: Entity,
     diagnostics: Vec<crate::materialx::diagnostic::MaterialXDiagnostic>,
-) {
+) -> ResolvedMaterial {
     let read = ReadPreviewMaterial {
         diffuse_color: Some([1.0, 0.0, 1.0]),
         roughness: Some(0.35),
@@ -215,9 +297,9 @@ fn attach_materialx_fallback(
     };
     let material = to_standard_material(&read, None);
     let handle = super::cache::intern_preview_material(world, &read, false, material);
-    if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
-        entity_mut.remove::<MeshMaterial3d<MaterialXMaterial>>();
-        entity_mut.insert((MeshMaterial3d(handle), MaterialXFailure(diagnostics)));
+    ResolvedMaterial {
+        material: RoutedMaterial::Standard(handle),
+        failure: Some(MaterialXFailure(diagnostics)),
     }
 }
 
@@ -225,10 +307,135 @@ fn material_property(name: &str) -> bool {
     name.starts_with("material:binding")
 }
 
+/// Bevy's screen-space refraction needs a geometric travel distance, while
+/// MaterialX correctly keeps that renderer concern out of the surface graph.
+/// Use the same convention as Bevy's transmission example: for a closed mesh,
+/// the smallest full AABB extent is its characteristic local-space thickness.
+/// Open/non-manifold meshes remain zero; authored `thin_walled` also forces
+/// zero later in the generated shader.
+fn read_materialx_mesh_thickness(ctx: &RouteCtx) -> f32 {
+    crate::read::geom::read_mesh(ctx.stage, ctx.path)
+        .ok()
+        .flatten()
+        .as_ref()
+        .map_or(0.0, materialx_mesh_thickness)
+}
+
+fn materialx_mesh_thickness(read: &crate::read::geom::ReadMesh) -> f32 {
+    if !mesh_is_closed(read) || read.points.is_empty() {
+        return 0.0;
+    }
+
+    let mut minimum = Vec3::splat(f32::INFINITY);
+    let mut maximum = Vec3::splat(f32::NEG_INFINITY);
+    for point in &read.points {
+        let point = Vec3::from_array(*point);
+        if !point.is_finite() {
+            return 0.0;
+        }
+        minimum = minimum.min(point);
+        maximum = maximum.max(point);
+    }
+    let extent = maximum - minimum;
+    let thickness = extent.min_element();
+    if thickness.is_finite() && thickness > f32::EPSILON {
+        thickness
+    } else {
+        0.0
+    }
+}
+
+fn mesh_is_closed(read: &crate::read::geom::ReadMesh) -> bool {
+    let mut edges: HashMap<(i32, i32), u32> = HashMap::new();
+    let mut cursor = 0usize;
+    for &count in &read.face_vertex_counts {
+        let Ok(count) = usize::try_from(count) else {
+            return false;
+        };
+        if count < 3 || cursor.saturating_add(count) > read.face_vertex_indices.len() {
+            return false;
+        }
+        let face = &read.face_vertex_indices[cursor..cursor + count];
+        for index in face {
+            if *index < 0 || *index as usize >= read.points.len() {
+                return false;
+            }
+        }
+        for index in 0..count {
+            let a = face[index];
+            let b = face[(index + 1) % count];
+            if a == b {
+                return false;
+            }
+            let edge = if a < b { (a, b) } else { (b, a) };
+            *edges.entry(edge).or_default() += 1;
+        }
+        cursor += count;
+    }
+    cursor == read.face_vertex_indices.len()
+        && !edges.is_empty()
+        && edges.values().all(|count| *count == 2)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::read::geom::{Orientation, ReadMesh, SubdivScheme};
     use bevy::shader::Shader;
+
+    fn test_mesh(
+        points: Vec<[f32; 3]>,
+        face_vertex_counts: Vec<i32>,
+        face_vertex_indices: Vec<i32>,
+    ) -> ReadMesh {
+        ReadMesh {
+            points,
+            face_vertex_counts,
+            face_vertex_indices,
+            normals: None,
+            uvs: None,
+            orientation: Orientation::RightHanded,
+            display_color: None,
+            display_opacity: None,
+            subsets: Vec::new(),
+            double_sided: false,
+            extent: None,
+            subdivision_scheme: SubdivScheme::None,
+        }
+    }
+
+    #[test]
+    fn closed_mesh_uses_smallest_full_extent_as_thickness() {
+        let cube = test_mesh(
+            vec![
+                [-1.0, -1.0, -1.0],
+                [1.0, -1.0, -1.0],
+                [1.0, 1.0, -1.0],
+                [-1.0, 1.0, -1.0],
+                [-1.0, -1.0, 1.0],
+                [1.0, -1.0, 1.0],
+                [1.0, 1.0, 1.0],
+                [-1.0, 1.0, 1.0],
+            ],
+            vec![4; 6],
+            vec![
+                0, 1, 2, 3, 4, 7, 6, 5, 0, 4, 5, 1, 1, 5, 6, 2, 2, 6, 7, 3, 3, 7, 4, 0,
+            ],
+        );
+        assert!(mesh_is_closed(&cube));
+        assert_eq!(materialx_mesh_thickness(&cube), 2.0);
+    }
+
+    #[test]
+    fn open_mesh_has_no_solid_refraction_thickness() {
+        let triangle = test_mesh(
+            vec![[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0]],
+            vec![3],
+            vec![0, 1, 2],
+        );
+        assert!(!mesh_is_closed(&triangle));
+        assert_eq!(materialx_mesh_thickness(&triangle), 0.0);
+    }
 
     fn fixture_stage(name: &str) -> openusd::usd::Stage {
         let path = format!(

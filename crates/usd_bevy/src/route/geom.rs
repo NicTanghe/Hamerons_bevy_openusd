@@ -163,7 +163,7 @@ impl PrimRoute for MeshRoute {
     }
 }
 
-fn mesh_property(name: &str) -> bool {
+pub(crate) fn mesh_property(name: &str) -> bool {
     matches!(
         name,
         "points"

@@ -34,6 +34,10 @@ pub struct CompiledMaterialX {
     pub uniforms: Vec<[f32; 4]>,
     pub textures: Vec<CompiledTexture>,
     pub alpha_blend: bool,
+    /// The graph carries a dielectric transmission closure and therefore needs
+    /// Bevy's transmissive render phase. This is deliberately independent of
+    /// cutout/coverage opacity.
+    pub transmission: bool,
     pub required_modules: Vec<String>,
     pub diagnostics: Vec<MaterialXDiagnostic>,
 }
@@ -196,6 +200,7 @@ impl<'a> Compiler<'a> {
             uniforms: self.uniforms,
             textures: self.textures,
             alpha_blend: surface.alpha_blend,
+            transmission: false,
             required_modules,
             diagnostics: self.diagnostics,
         })
