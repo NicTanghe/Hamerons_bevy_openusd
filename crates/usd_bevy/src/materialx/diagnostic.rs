@@ -13,6 +13,9 @@ pub enum Severity {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DiagnosticCode {
+    InvalidDocument,
+    MissingMaterial,
+    AmbiguousMaterial,
     MissingTerminal,
     AmbiguousConnection,
     InvalidConnection,

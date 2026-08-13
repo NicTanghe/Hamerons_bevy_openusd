@@ -11,8 +11,11 @@ use bevy::prelude::*;
 use openusd::sdf::Path;
 
 use super::{PrimRoute, RouteCtx};
-use crate::materialx::compiler::{compile_materialx, has_materialx_terminal};
+use crate::materialx::compiler::{CompileFailure, compile_materialx, has_materialx_terminal};
 use crate::materialx::diagnostic::{MaterialXDiagnostics, MaterialXFailure, Severity};
+use crate::materialx::external::{
+    MaterialXDocumentRegistry, compile_external_materialx, find_external_materialx,
+};
 use crate::materialx::material::{MaterialXMaterial, prepare_material};
 use crate::materialx::registry::MaterialXRegistry;
 use crate::read::shade::{ReadPreviewMaterial, read_material_binding, read_preview_material};
@@ -103,8 +106,29 @@ impl PrimRoute for MaterialRoute {
             .get_resource::<MaterialXRegistry>()
             .cloned()
             .unwrap_or_default();
-        if has_materialx_terminal(ctx.stage, &binding, &registry) {
-            match compile_materialx(ctx.stage, &binding, ctx.time, &registry) {
+        let materialx_result = if has_materialx_terminal(ctx.stage, &binding, &registry) {
+            Some(compile_materialx(ctx.stage, &binding, ctx.time, &registry))
+        } else {
+            match find_external_materialx(ctx.stage, &binding) {
+                Ok(Some(source)) => {
+                    let document_registry = world
+                        .get_resource::<MaterialXDocumentRegistry>()
+                        .cloned()
+                        .unwrap_or_default();
+                    Some(compile_external_materialx(
+                        &source,
+                        &binding,
+                        &document_registry,
+                    ))
+                }
+                Ok(None) => None,
+                Err(diagnostic) => Some(Err(CompileFailure {
+                    diagnostics: vec![diagnostic],
+                })),
+            }
+        };
+        if let Some(result) = materialx_result {
+            match result {
                 Ok(compiled) => {
                     for diagnostic in &compiled.diagnostics {
                         record_materialx_diagnostic(world, diagnostic.clone());
@@ -231,6 +255,7 @@ mod tests {
         world.insert_resource(Assets::<MaterialXMaterial>::default());
         world.insert_resource(Assets::<Shader>::default());
         world.insert_resource(MaterialXRegistry::default());
+        world.insert_resource(MaterialXDocumentRegistry::default());
         world.insert_resource(MaterialXDiagnostics::default());
         world.insert_resource(crate::materialx::material::MaterialXTextureCache::default());
         world

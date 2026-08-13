@@ -14,6 +14,16 @@ use super::registry::{Coverage, MaterialXRegistry, Port};
 pub const MAX_UNIFORMS: usize = 64;
 pub const MAX_TEXTURES: usize = 4;
 
+/// One texture and its MaterialX sampling metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CompiledTexture {
+    pub path: String,
+    pub is_srgb: bool,
+    pub u_address_mode: String,
+    pub v_address_mode: String,
+    pub filter_type: String,
+}
+
 /// A compiled graph plus its runtime values and resource dependencies.
 #[derive(Debug, Clone)]
 pub struct CompiledMaterialX {
@@ -22,7 +32,7 @@ pub struct CompiledMaterialX {
     pub graph_key: u64,
     pub wesl: String,
     pub uniforms: Vec<[f32; 4]>,
-    pub textures: Vec<String>,
+    pub textures: Vec<CompiledTexture>,
     pub alpha_blend: bool,
     pub required_modules: Vec<String>,
     pub diagnostics: Vec<MaterialXDiagnostic>,
@@ -134,7 +144,7 @@ struct Compiler<'a> {
     time: Option<TimeCode>,
     registry: &'a MaterialXRegistry,
     uniforms: Vec<[f32; 4]>,
-    textures: Vec<String>,
+    textures: Vec<CompiledTexture>,
     lines: Vec<String>,
     modules: BTreeSet<String>,
     imports: BTreeSet<(String, String)>,
@@ -627,7 +637,15 @@ impl<'a> Compiler<'a> {
         }
 
         let texture_index = self.textures.len();
-        self.textures.push(file);
+        self.textures.push(CompiledTexture {
+            path: file,
+            // Preserve the behavior of the original UsdShade vertical slice.
+            // Standalone MaterialX documents provide exact colorspace metadata.
+            is_srgb: true,
+            u_address_mode: "periodic".into(),
+            v_address_mode: "periodic".into(),
+            filter_type: "linear".into(),
+        });
         let default = self.lower_input(prim, port(descriptor, "default")?)?.0;
         let texcoord = self.lower_input(prim, port(descriptor, "texcoord")?)?.0;
         let module = descriptor.module.clone().expect("validated image module");

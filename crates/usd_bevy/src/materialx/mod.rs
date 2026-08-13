@@ -9,14 +9,16 @@
 //! opacity and normal, translated constants/arithmetic, and image sampling on
 //! UV0. Unknown or invalid graphs receive structured diagnostics and a visible
 //! magenta fallback. Limits are 64 uniform values and four 2D images per
-//! material. Direct `.mtlx`, closures, arbitrary primvars/UV sets, UDIMs,
+//! material. External `.mtlx` references are compiled by the renderer-neutral
+//! `materialx_wesl` crate. Closures, arbitrary primvars/UV sets, UDIMs,
 //! displacement and volume remain deliberately unsupported.
 
 pub mod compiler;
 pub mod diagnostic;
 pub mod emit;
+pub mod external;
 pub mod material;
 pub mod registry;
 
 /// Translator repository revision pinned by the submodule handover.
-pub const TRANSLATOR_REVISION: &str = "01878225a2d7f0e0d200421984d5081cf964db2b";
+pub const TRANSLATOR_REVISION: &str = materialx_wesl::TRANSLATOR_REVISION;

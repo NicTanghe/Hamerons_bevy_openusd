@@ -6,7 +6,10 @@ use std::path::Path;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::asset::uuid::Uuid;
-use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
+use bevy::image::{
+    CompressedImageFormats, ImageAddressMode, ImageFilterMode, ImageSampler,
+    ImageSamplerDescriptor, ImageType,
+};
 use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey};
 use bevy::platform::hash::FixedHasher;
 use bevy::prelude::*;
@@ -15,7 +18,7 @@ use bevy::render::render_resource::{
 };
 use bevy::shader::Shader;
 
-use super::compiler::{CompiledMaterialX, MAX_TEXTURES, MAX_UNIFORMS};
+use super::compiler::{CompiledMaterialX, CompiledTexture, MAX_TEXTURES, MAX_UNIFORMS};
 use super::diagnostic::{DiagnosticCode, MaterialXDiagnostic};
 use super::registry::MaterialXRegistry;
 
@@ -24,7 +27,7 @@ const GRAPH_UUID_PREFIX: u128 = 0x4d58_4752_4150_4853_0000_0000_0000_0000;
 
 /// Strong handles for synchronously decoded USD-resolved texture files.
 #[derive(Resource, Default)]
-pub struct MaterialXTextureCache(HashMap<String, Handle<Image>>);
+pub struct MaterialXTextureCache(HashMap<CompiledTexture, Handle<Image>>);
 
 /// Fixed host resource layout for the first MaterialX slice.
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
@@ -97,8 +100,8 @@ pub fn prepare_material(
         *target = Vec4::from(*source);
     }
     let mut textures: [Option<Handle<Image>>; MAX_TEXTURES] = Default::default();
-    for (target, path) in textures.iter_mut().zip(&compiled.textures) {
-        *target = Some(load_texture(world, compiled, path)?);
+    for (target, texture) in textures.iter_mut().zip(&compiled.textures) {
+        *target = Some(load_texture(world, compiled, texture)?);
     }
     let [texture_0, texture_1, texture_2, texture_3] = textures;
     Ok(MaterialXMaterial {
@@ -119,43 +122,81 @@ pub fn prepare_material(
 fn load_texture(
     world: &mut World,
     compiled: &CompiledMaterialX,
-    path: &str,
+    texture: &CompiledTexture,
 ) -> Result<Handle<Image>, MaterialXDiagnostic> {
     if let Some(handle) = world
         .get_resource::<MaterialXTextureCache>()
-        .and_then(|cache| cache.0.get(path))
+        .and_then(|cache| cache.0.get(texture))
     {
         return Ok(handle.clone());
     }
     if world.get_resource::<Assets<Image>>().is_none() {
         return Err(texture_error(
             compiled,
-            path,
+            &texture.path,
             "Image assets are unavailable; add Bevy's image/render plugins before UsdPlugin",
         ));
     }
 
-    let bytes = std::fs::read(path)
-        .map_err(|error| texture_error(compiled, path, format!("cannot read texture: {error}")))?;
-    let extension = Path::new(path)
+    let bytes = std::fs::read(&texture.path).map_err(|error| {
+        texture_error(
+            compiled,
+            &texture.path,
+            format!("cannot read texture: {error}"),
+        )
+    })?;
+    let extension = Path::new(&texture.path)
         .extension()
         .and_then(|extension| extension.to_str())
-        .ok_or_else(|| texture_error(compiled, path, "texture has no usable file extension"))?;
+        .ok_or_else(|| {
+            texture_error(
+                compiled,
+                &texture.path,
+                "texture has no usable file extension",
+            )
+        })?;
     let image = Image::from_buffer(
         &bytes,
         ImageType::Extension(extension),
         CompressedImageFormats::NONE,
-        true,
-        ImageSampler::Default,
+        texture.is_srgb,
+        texture_sampler(texture),
         RenderAssetUsages::default(),
     )
-    .map_err(|error| texture_error(compiled, path, format!("cannot decode texture: {error}")))?;
+    .map_err(|error| {
+        texture_error(
+            compiled,
+            &texture.path,
+            format!("cannot decode texture: {error}"),
+        )
+    })?;
     let handle = world.resource_mut::<Assets<Image>>().add(image);
     world
         .resource_mut::<MaterialXTextureCache>()
         .0
-        .insert(path.into(), handle.clone());
+        .insert(texture.clone(), handle.clone());
     Ok(handle)
+}
+
+fn texture_sampler(texture: &CompiledTexture) -> ImageSampler {
+    let mut descriptor = ImageSamplerDescriptor::linear();
+    descriptor.address_mode_u = address_mode(&texture.u_address_mode);
+    descriptor.address_mode_v = address_mode(&texture.v_address_mode);
+    let filter = if texture.filter_type.eq_ignore_ascii_case("closest") {
+        ImageFilterMode::Nearest
+    } else {
+        ImageFilterMode::Linear
+    };
+    descriptor.set_filter(filter);
+    ImageSampler::Descriptor(descriptor)
+}
+
+fn address_mode(mode: &str) -> ImageAddressMode {
+    match mode.to_ascii_lowercase().as_str() {
+        "periodic" | "repeat" => ImageAddressMode::Repeat,
+        "mirror" | "mirror_repeat" => ImageAddressMode::MirrorRepeat,
+        _ => ImageAddressMode::ClampToEdge,
+    }
 }
 
 fn texture_error(

@@ -22,7 +22,7 @@ usd_bevy = { path = "crates/usd_bevy" }
 openusd = { git = "https://github.com/mxpv/openusd", features = ["geom", "shade"] }
 
 # mara — the egui UI host (window + ribbons/panes) embedding a Bevy viewport.
-mara = { git = "https://github.com/bresilla/mara.git", default-features = false, features = ["window", "bevy"] }
+mara = { path = "../mara/mara", default-features = false, features = ["window", "bevy"] }
 # Native "Open USD…" file picker.
 rfd = "0.15"
 # Detailed, filterable tracing to stderr (the embedded Bevy app has no
@@ -50,6 +50,6 @@ bevy = { git = "https://github.com/bevyengine/bevy", rev = "7107093556e4069db839
 ] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-eframe = { version = "0.34", default-features = false, features = ["default_fonts", "wgpu", "x11"] }
-wgpu = { version = "29", default-features = false, features = ["vulkan"] }
-egui-wgpu = { version = "0.34", default-features = false, features = ["winit"] }
+eframe = { version = "0.36.1", default-features = false, features = ["default_fonts", "wgpu", "x11"] }
+wgpu = { version = "30", default-features = false, features = ["vulkan"] }
+egui-wgpu = { version = "0.36.1", default-features = false, features = ["winit"] }

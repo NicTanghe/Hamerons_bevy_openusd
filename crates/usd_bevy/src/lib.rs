@@ -47,6 +47,7 @@ impl Plugin for UsdPlugin {
         // Intern projected meshes so identical prims share one GPU asset (6d).
         app.init_resource::<route::cache::ProjectionCache>();
         app.init_resource::<materialx::registry::MaterialXRegistry>();
+        app.init_resource::<materialx::external::MaterialXDocumentRegistry>();
         app.init_resource::<materialx::diagnostic::MaterialXDiagnostics>();
         app.init_resource::<materialx::material::MaterialXTextureCache>();
         // Native mesh bakes finish off-thread; attach a bounded number of

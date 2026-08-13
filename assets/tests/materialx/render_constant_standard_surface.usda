@@ -1,0 +1,39 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    doc = "Renderable MaterialX smoke-test scene for the Mara/Bevy viewport."
+)
+
+def Xform "World"
+{
+    def Cube "MaterialXCube" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double size = 4
+        rel material:binding = </World/Mat>
+    }
+
+    def Material "Mat"
+    {
+        token outputs:mtlx:surface.connect = </World/Mat/Material.outputs:out>
+
+        def Shader "Material"
+        {
+            uniform token info:id = "ND_surfacematerial"
+            token inputs:surfaceshader.connect = </World/Mat/Surface.outputs:out>
+            token outputs:out
+        }
+
+        def Shader "Surface"
+        {
+            uniform token info:id = "ND_standard_surface_surfaceshader"
+            color3f inputs:base_color = (0.08, 0.42, 0.95)
+            float inputs:metalness = 0.35
+            float inputs:specular_roughness = 0.22
+            color3f inputs:emission_color = (0.02, 0.05, 0.15)
+            float inputs:emission = 0.25
+            token outputs:out
+        }
+    }
+}
