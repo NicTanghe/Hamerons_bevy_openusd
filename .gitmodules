@@ -1,0 +1,3 @@
+[submodule "vendor/materialx-wesl"]
+	path = vendor/materialx-wesl
+	url = https://github.com/NicTanghe/MaterialX-to-WESL.git

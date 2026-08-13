@@ -1,0 +1,23 @@
+#usda 1.0
+
+def Material "Mat"
+{
+    token outputs:mtlx:surface.connect = </Mat/Surface.outputs:out>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "ND_standard_surface_surfaceshader"
+        color3f inputs:base_color.connect = </Mat/Shared.outputs:out>
+        color3f inputs:emission_color.connect = </Mat/Shared.outputs:out>
+        float inputs:emission = 0.2
+        token outputs:out
+    }
+
+    def Shader "Shared"
+    {
+        uniform token info:id = "ND_add_color3"
+        color3f inputs:in1 = (0.1, 0.2, 0.3)
+        color3f inputs:in2 = (0.3, 0.2, 0.1)
+        color3f outputs:out
+    }
+}

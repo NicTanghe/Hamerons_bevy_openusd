@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/usd_bevy", "crates/usd_macro"]
-exclude = ["xtra"]
+exclude = ["xtra", "vendor/materialx-wesl/tools"]
 
 [package]
 name = "usdview"
@@ -30,9 +30,10 @@ rfd = "0.15"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Bevy 0.19 (needs Rust 1.95+) — the embedded viewport renders the USD scene
-# offscreen into a mara-provided render target.
-bevy = { version = "0.19", default-features = false, features = [
+# Pin Bevy main: MaterialX shaders use its WESL runtime. WESL support is
+# unconditional on this revision; keep the revision in sync with
+# `crates/usd_bevy/Cargo.toml`.
+bevy = { git = "https://github.com/bevyengine/bevy", rev = "7107093556e4069db8399760ba5151b719107c71", default-features = false, features = [
     "std",
     "bevy_asset",
     "bevy_log",
@@ -43,6 +44,8 @@ bevy = { version = "0.19", default-features = false, features = [
     "bevy_mesh",
     "bevy_camera",
     "bevy_image",
+    "png",
+    "jpeg",
     "reflect_auto_register",
 ] }
 

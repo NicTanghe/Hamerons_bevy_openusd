@@ -12,7 +12,11 @@ openusd = { git = "https://github.com/mxpv/openusd", features = ["geom", "shade"
 glam = "0.30"
 anyhow = "1"
 log = "0.4"
-bevy = { version = "0.19", default-features = false, features = [
+ron = "0.12.1"
+serde = { version = "1", features = ["derive"] }
+# Keep this pinned revision in sync with the workspace root. Its WESL runtime
+# is unconditional rather than gated by a `shader_format_wesl` feature.
+bevy = { git = "https://github.com/bevyengine/bevy", rev = "7107093556e4069db8399760ba5151b719107c71", default-features = false, features = [
     "std",
     "bevy_asset",
     "bevy_log",
@@ -23,5 +27,14 @@ bevy = { version = "0.19", default-features = false, features = [
     "bevy_mesh",
     "bevy_camera",
     "bevy_image",
+    "png",
+    "jpeg",
     "reflect_auto_register",
 ] }
+
+[build-dependencies]
+ron = "0.12.1"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+wesl = { version = "0.4.2", features = ["naga-ext"] }

@@ -11,6 +11,7 @@ extern crate self as usd_bevy;
 
 pub mod authoring;
 pub mod live;
+pub mod materialx;
 pub mod mesh;
 pub mod prim_ref;
 pub mod read;
@@ -24,6 +25,7 @@ pub use route::{DisplayPurposes, PrimRoute, RouteCtx, SchemaRegistry};
 pub use usd_macro::usd;
 
 use bevy::app::{App, Plugin, Update};
+use bevy::pbr::MaterialPlugin;
 
 /// Registers the [`UsdPrimRef`] reflect type and installs the built-in
 /// [`SchemaRegistry`] (transform / visibility / mesh / reflect routes). Pair
@@ -37,12 +39,16 @@ pub struct UsdPlugin;
 
 impl Plugin for UsdPlugin {
     fn build(&self, app: &mut App) {
+        app.add_plugins(MaterialPlugin::<materialx::material::MaterialXMaterial>::default());
         app.register_type::<UsdPrimRef>();
         if !app.world().contains_resource::<SchemaRegistry>() {
             app.insert_resource(SchemaRegistry::builtin());
         }
         // Intern projected meshes so identical prims share one GPU asset (6d).
         app.init_resource::<route::cache::ProjectionCache>();
+        app.init_resource::<materialx::registry::MaterialXRegistry>();
+        app.init_resource::<materialx::diagnostic::MaterialXDiagnostics>();
+        app.init_resource::<materialx::material::MaterialXTextureCache>();
         // Native mesh bakes finish off-thread; attach a bounded number of
         // completed assets each frame so the UI stays responsive.
         app.add_systems(Update, route::cache::apply_completed_usd_meshes);

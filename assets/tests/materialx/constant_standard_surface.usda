@@ -1,0 +1,22 @@
+#usda 1.0
+
+def Material "Mat"
+{
+    token outputs:mtlx:surface.connect = </Mat/Material.outputs:out>
+
+    def Shader "Material"
+    {
+        uniform token info:id = "ND_surfacematerial"
+        token inputs:surfaceshader.connect = </Mat/Surface.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "ND_standard_surface_surfaceshader"
+        color3f inputs:base_color = (0.2, 0.4, 0.6)
+        float inputs:metalness = 0.7
+        float inputs:specular_roughness = 0.25
+        token outputs:out
+    }
+}

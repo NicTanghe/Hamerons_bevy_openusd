@@ -1,0 +1,29 @@
+#usda 1.0
+
+def Material "Mat"
+{
+    token outputs:mtlx:surface.connect = </Mat/Surface.outputs:out>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "ND_standard_surface_surfaceshader"
+        color3f inputs:base_color.connect = </Mat/Image.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "Image"
+    {
+        uniform token info:id = "ND_image_color3"
+        asset inputs:file = @../../external/cows/Cow_FBX_PNG/Cow_F/Textures/Cow_F_BaseColor.png@
+        color3f inputs:default = (1, 0, 1)
+        float2 inputs:texcoord.connect = </Mat/Texcoord.outputs:out>
+        color3f outputs:out
+    }
+
+    def Shader "Texcoord"
+    {
+        uniform token info:id = "ND_texcoord_vector2"
+        int inputs:index = 0
+        float2 outputs:out
+    }
+}

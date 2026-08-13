@@ -1,0 +1,20 @@
+#usda 1.0
+
+def Material "Mat"
+{
+    token outputs:mtlx:surface.connect = </Mat/Surface.outputs:out>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "ND_standard_surface_surfaceshader"
+        color3f inputs:base_color.connect = </Mat/Value.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "Value"
+    {
+        uniform token info:id = "ND_constant_float"
+        float inputs:value = 0.5
+        float outputs:out
+    }
+}
