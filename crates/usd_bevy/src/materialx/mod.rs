@@ -15,6 +15,7 @@
 //! Subsurface and the remaining closure families, arbitrary primvars/UV sets,
 //! UDIMs, displacement and volume remain deliberately unsupported.
 
+pub mod asset;
 pub mod compiler;
 pub mod diagnostic;
 pub mod emit;

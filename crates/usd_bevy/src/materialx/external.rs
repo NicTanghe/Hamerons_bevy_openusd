@@ -11,6 +11,7 @@ use materialx_wesl::{
 use openusd::sdf::{FieldKey, Path, Value};
 use openusd::usd::Stage;
 
+use super::asset::MaterialXAssetReader;
 use super::compiler::{
     CompileFailure, CompiledMaterialX, CompiledTexture, MAX_TEXTURES, MAX_UNIFORMS,
 };
@@ -44,6 +45,7 @@ pub struct ExternalMaterialXSource {
 pub fn find_external_materialx(
     stage: &Stage,
     material: &Path,
+    asset_reader: Option<&MaterialXAssetReader>,
 ) -> Result<Option<ExternalMaterialXSource>, MaterialXDiagnostic> {
     let material_name = material.name().ok_or_else(|| {
         MaterialXDiagnostic::error(
@@ -96,7 +98,9 @@ pub fn find_external_materialx(
             0 => {}
             1 => {
                 let document = candidates.into_iter().next().unwrap();
-                if !document.is_file() {
+                let exists = document.is_file()
+                    || asset_reader.is_some_and(|reader| reader.contains(&document));
+                if !exists {
                     return Err(MaterialXDiagnostic::error(
                         DiagnosticCode::MissingAsset,
                         material.as_str(),
@@ -130,21 +134,19 @@ pub fn compile_external_materialx(
     source: &ExternalMaterialXSource,
     material_path: &Path,
     registry: &MaterialXDocumentRegistry,
+    asset_reader: Option<&MaterialXAssetReader>,
 ) -> Result<CompiledMaterialX, CompileFailure> {
-    let document = Document::load(&source.document).map_err(|diagnostics| CompileFailure {
-        diagnostics: diagnostics
-            .into_vec()
-            .into_iter()
-            .map(|diagnostic| adapt_diagnostic(diagnostic, material_path))
-            .collect(),
-    })?;
+    let document = load_external_document(source, material_path, asset_reader)?;
     let limits = CompilerLimits {
         max_nodes: 1024,
         max_depth: 256,
         max_uniforms: MAX_UNIFORMS,
         max_textures: MAX_TEXTURES,
     };
+    let asset_exists =
+        |path: &FsPath| path.is_file() || asset_reader.is_some_and(|reader| reader.contains(path));
     let compiled = Compiler::with_limits(&registry.0, limits)
+        .with_asset_exists(&asset_exists)
         .compile(&document, &source.material_name)
         .map_err(|failure| CompileFailure {
             diagnostics: failure
@@ -202,6 +204,51 @@ pub fn compile_external_materialx(
             .collect(),
         diagnostics: compiled
             .diagnostics
+            .into_iter()
+            .map(|diagnostic| adapt_diagnostic(diagnostic, material_path))
+            .collect(),
+    })
+}
+
+fn load_external_document(
+    source: &ExternalMaterialXSource,
+    material_path: &Path,
+    asset_reader: Option<&MaterialXAssetReader>,
+) -> Result<Document, CompileFailure> {
+    let document = if let Some(reader) = asset_reader {
+        match reader.read(&source.document) {
+            Ok(bytes) => {
+                let text = String::from_utf8(bytes).map_err(|error| CompileFailure {
+                    diagnostics: vec![MaterialXDiagnostic::error(
+                        DiagnosticCode::InvalidDocument,
+                        material_path.as_str(),
+                        None,
+                        Some(source.document.display().to_string()),
+                        format!("MaterialX document is not UTF-8: {error}"),
+                    )],
+                })?;
+                Document::parse_with_source(&text, Some(source.document.clone()))
+            }
+            Err(error) if !source.document.is_file() => {
+                return Err(CompileFailure {
+                    diagnostics: vec![MaterialXDiagnostic::error(
+                        DiagnosticCode::MissingAsset,
+                        material_path.as_str(),
+                        None,
+                        Some(source.document.display().to_string()),
+                        format!("cannot read MaterialX document: {error}"),
+                    )],
+                });
+            }
+            Err(_) => Document::load(&source.document),
+        }
+    } else {
+        Document::load(&source.document)
+    };
+
+    document.map_err(|diagnostics| CompileFailure {
+        diagnostics: diagnostics
+            .into_vec()
             .into_iter()
             .map(|diagnostic| adapt_diagnostic(diagnostic, material_path))
             .collect(),
@@ -463,16 +510,18 @@ fn main_pass_post_lighting_processing(input: PbrInput, color: vec4f) -> vec4f {
         let binding = read_material_binding(&stage, &render)
             .unwrap()
             .expect("chessboard render mesh has a material binding");
-        let source = find_external_materialx(&stage, &binding)
+        let source = find_external_materialx(&stage, &binding, None)
             .unwrap()
             .expect("binding ancestry contains a .mtlx reference");
         assert_eq!(source.material_name, "M_Chessboard");
         assert!(source.document.ends_with("Chessboard_mat.mtlx"));
 
         let registry = MaterialXDocumentRegistry::default();
-        let compiled = compile_external_materialx(&source, &binding, &registry).unwrap();
+        let compiled = compile_external_materialx(&source, &binding, &registry, None).unwrap();
         assert_eq!(compiled.textures.len(), 4);
         assert!(compiled.textures[0].is_srgb);
+        assert!(compiled.wesl.contains("@size(16) thickness: f32"));
+        assert!(!compiled.wesl.contains("webgl_padding"));
         assert!(
             compiled.textures[1..]
                 .iter()
@@ -496,7 +545,7 @@ fn main_pass_post_lighting_processing(input: PbrInput, color: vec4f) -> vec4f {
         };
         let material = Path::new("/ChessSet/Black/Pawns/Pawn/Looks/M_Pawn_Top_B").unwrap();
         let registry = MaterialXDocumentRegistry::default();
-        let compiled = compile_external_materialx(&source, &material, &registry).unwrap();
+        let compiled = compile_external_materialx(&source, &material, &registry, None).unwrap();
 
         assert!(compiled.transmission);
         assert!(!compiled.alpha_blend, "transmission is not alpha opacity");
@@ -513,5 +562,41 @@ fn main_pass_post_lighting_processing(input: PbrInput, color: vec4f) -> vec4f {
                 .any(|module| module == "pbrlib::mx_roughness_anisotropy")
         );
         validate_wesl(&compiled, &registry.0);
+    }
+
+    #[test]
+    fn compiles_document_and_texture_from_host_asset_reader() {
+        const DOCUMENT: &str = r#"<materialx>
+  <image name="I" type="color3">
+    <input name="file" type="filename" value="texture.png" />
+  </image>
+  <standard_surface name="S" type="surfaceshader">
+    <input name="base_color" type="color3" nodename="I" />
+  </standard_surface>
+  <surfacematerial name="M" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="S" />
+  </surfacematerial>
+</materialx>"#;
+        let reader = MaterialXAssetReader::new(|path| {
+            if path.ends_with("material.mtlx") {
+                Ok(DOCUMENT.as_bytes().to_vec())
+            } else if path.ends_with("texture.png") {
+                Ok(vec![0])
+            } else {
+                Err(format!("{} is unavailable", path.display()))
+            }
+        });
+        let source = ExternalMaterialXSource {
+            document: PathBuf::from("virtual/material.mtlx"),
+            material_name: "M".into(),
+        };
+        let material = Path::new("/M").unwrap();
+        let registry = MaterialXDocumentRegistry::default();
+
+        let compiled =
+            compile_external_materialx(&source, &material, &registry, Some(&reader)).unwrap();
+
+        assert_eq!(compiled.textures.len(), 1);
+        assert!(compiled.textures[0].path.ends_with("virtual/texture.png"));
     }
 }

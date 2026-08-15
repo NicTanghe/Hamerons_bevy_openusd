@@ -33,7 +33,7 @@ pub(super) fn root_module(
          @group(constants::MATERIAL_BIND_GROUP) @binding(0)\n\
          var<uniform> materialx: MaterialXUniforms;\n\
          struct MaterialXRendererParams {\n\
-         \x20   thickness: f32,\n\
+         \x20   @size(16) thickness: f32,\n\
          }\n\
          @group(constants::MATERIAL_BIND_GROUP) @binding(9)\n\
          var<uniform> materialx_renderer: MaterialXRendererParams;\n",
@@ -144,7 +144,7 @@ pub(super) fn external_root_module(compiled: &CompiledMaterial, uses_normal: boo
          @group(constants::MATERIAL_BIND_GROUP) @binding(0)\n\
          var<uniform> materialx: MaterialXUniforms;\n\
          struct MaterialXRendererParams {\n\
-         \x20   thickness: f32,\n\
+         \x20   @size(16) thickness: f32,\n\
          }\n\
          @group(constants::MATERIAL_BIND_GROUP) @binding(9)\n\
          var<uniform> materialx_renderer: MaterialXRendererParams;\n",

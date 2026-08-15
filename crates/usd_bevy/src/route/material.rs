@@ -12,6 +12,7 @@ use openusd::sdf::Path;
 use std::collections::HashMap;
 
 use super::{PrimRoute, RouteCtx};
+use crate::materialx::asset::MaterialXAssetReader;
 use crate::materialx::compiler::{CompileFailure, compile_materialx, has_materialx_terminal};
 use crate::materialx::diagnostic::{MaterialXDiagnostics, MaterialXFailure, Severity};
 use crate::materialx::external::{
@@ -189,10 +190,11 @@ pub(crate) fn resolve_material(ctx: &RouteCtx, world: &mut World) -> Option<Reso
         .get_resource::<MaterialXRegistry>()
         .cloned()
         .unwrap_or_default();
+    let asset_reader = world.get_resource::<MaterialXAssetReader>().cloned();
     let materialx_result = if has_materialx_terminal(ctx.stage, &binding, &registry) {
         Some(compile_materialx(ctx.stage, &binding, ctx.time, &registry))
     } else {
-        match find_external_materialx(ctx.stage, &binding) {
+        match find_external_materialx(ctx.stage, &binding, asset_reader.as_ref()) {
             Ok(Some(source)) => {
                 let document_registry = world
                     .get_resource::<MaterialXDocumentRegistry>()
@@ -202,6 +204,7 @@ pub(crate) fn resolve_material(ctx: &RouteCtx, world: &mut World) -> Option<Reso
                     &source,
                     &binding,
                     &document_registry,
+                    asset_reader.as_ref(),
                 ))
             }
             Ok(None) => None,

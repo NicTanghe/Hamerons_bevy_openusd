@@ -20,8 +20,11 @@ use bevy::shader::Shader;
 #[cfg(not(target_arch = "wasm32"))]
 use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 
+use super::asset::MaterialXAssetReader;
 use super::compiler::{CompiledMaterialX, CompiledTexture, MAX_TEXTURES, MAX_UNIFORMS};
-use super::diagnostic::{DiagnosticCode, MaterialXDiagnostic, MaterialXDiagnostics};
+#[cfg(not(target_arch = "wasm32"))]
+use super::diagnostic::MaterialXDiagnostics;
+use super::diagnostic::{DiagnosticCode, MaterialXDiagnostic};
 use super::registry::MaterialXRegistry;
 
 const MODULE_UUID_PREFIX: u128 = 0x4d58_5745_534c_4d4f_0000_0000_0000_0000;
@@ -55,6 +58,12 @@ struct PendingTexture {
 #[derive(Debug, Clone, Copy, ShaderType)]
 pub struct MaterialXRendererParams {
     pub thickness: f32,
+    // These fields make encase physically upload 16 bytes. They are deliberately
+    // absent from the generated WESL, which represents the same trailing space
+    // with `@size(16)` and therefore exposes no padding names to GLSL ES.
+    padding_0: f32,
+    padding_1: f32,
+    padding_2: f32,
 }
 
 /// Fixed host resource layout for the first MaterialX slice.
@@ -158,6 +167,9 @@ pub fn prepare_material(
         texture_3,
         renderer: MaterialXRendererParams {
             thickness: renderer_thickness,
+            padding_0: 0.0,
+            padding_1: 0.0,
+            padding_2: 0.0,
         },
         graph_key: compiled.graph_key,
         alpha_mode: if compiled.alpha_blend {
@@ -187,6 +199,7 @@ fn load_texture(
             "Image assets are unavailable; add Bevy's image/render plugins before UsdPlugin",
         ));
     }
+    let asset_reader = world.get_resource::<MaterialXAssetReader>().cloned();
 
     #[cfg(not(target_arch = "wasm32"))]
     if world.get_resource::<MaterialXPendingTextures>().is_some()
@@ -194,7 +207,8 @@ fn load_texture(
     {
         let handle = world.resource::<Assets<Image>>().reserve_handle();
         let owned_texture = texture.clone();
-        let task = pool.spawn(async move { decode_texture(&owned_texture) });
+        let task_reader = asset_reader.clone();
+        let task = pool.spawn(async move { decode_texture(&owned_texture, task_reader.as_ref()) });
         world
             .resource_mut::<MaterialXTextureCache>()
             .0
@@ -213,7 +227,7 @@ fn load_texture(
         return Ok(handle);
     }
 
-    let image = decode_texture(texture)
+    let image = decode_texture(texture, asset_reader.as_ref())
         .map_err(|message| texture_error(compiled, &texture.path, message))?;
     let handle = world.resource_mut::<Assets<Image>>().add(image);
     world
@@ -223,9 +237,17 @@ fn load_texture(
     Ok(handle)
 }
 
-fn decode_texture(texture: &CompiledTexture) -> Result<Image, String> {
-    let bytes =
-        std::fs::read(&texture.path).map_err(|error| format!("cannot read texture: {error}"))?;
+fn decode_texture(
+    texture: &CompiledTexture,
+    asset_reader: Option<&MaterialXAssetReader>,
+) -> Result<Image, String> {
+    let bytes = if let Some(reader) = asset_reader {
+        reader
+            .read(Path::new(&texture.path))
+            .map_err(|error| format!("cannot read texture: {error}"))?
+    } else {
+        std::fs::read(&texture.path).map_err(|error| format!("cannot read texture: {error}"))?
+    };
     let extension = Path::new(&texture.path)
         .extension()
         .and_then(|extension| extension.to_str())
@@ -405,5 +427,47 @@ mod tests {
         assert_eq!(graph_shader_handle(7).id(), graph_shader_handle(7).id());
         assert_ne!(graph_shader_handle(7).id(), graph_shader_handle(8).id());
         assert_ne!(module_uuid("generated::inline"), graph_uuid(7));
+    }
+
+    #[test]
+    fn renderer_uniform_is_webgl_aligned() {
+        assert_eq!(MaterialXRendererParams::min_size().get(), 16);
+
+        let params = MaterialXRendererParams {
+            thickness: 1.0,
+            padding_0: 0.0,
+            padding_1: 0.0,
+            padding_2: 0.0,
+        };
+        let mut buffer =
+            bevy::render::render_resource::encase::UniformBuffer::new(Vec::<u8>::new());
+        buffer.write(&params).unwrap();
+        assert_eq!(buffer.into_inner().len(), 16);
+    }
+
+    #[test]
+    fn decodes_texture_from_host_asset_reader() {
+        let texture_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../../assets/full_assets/OpenChessSet/assets/Chessboard/tex/chessboard_base_color.jpg",
+        );
+        if !texture_path.is_file() {
+            eprintln!("skipping sibling OpenChessSet texture test");
+            return;
+        }
+        let bytes = std::fs::read(texture_path).unwrap();
+        let reader = MaterialXAssetReader::new(move |path| {
+            (path == Path::new("virtual.jpg"))
+                .then(|| bytes.clone())
+                .ok_or_else(|| "missing".to_owned())
+        });
+        let texture = CompiledTexture {
+            path: "virtual.jpg".into(),
+            is_srgb: true,
+            u_address_mode: "periodic".into(),
+            v_address_mode: "periodic".into(),
+            filter_type: "linear".into(),
+        };
+
+        decode_texture(&texture, Some(&reader)).expect("host-provided JPEG should decode");
     }
 }
