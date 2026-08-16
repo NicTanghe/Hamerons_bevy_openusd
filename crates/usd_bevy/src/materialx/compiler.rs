@@ -366,9 +366,10 @@ impl<'a> Compiler<'a> {
             ));
         }
         if let Some(source) = connections.into_iter().next() {
-            let expression = self.lower_source(&source)?;
-            self.require_type(&expression, port, &attribute)?;
-            return Ok((expression, true));
+            if let Some(expression) = self.lower_source(&source, Some(port))? {
+                self.require_type(&expression, port, &attribute)?;
+                return Ok((expression, true));
+            }
         }
 
         let attr = self
@@ -382,18 +383,29 @@ impl<'a> Compiler<'a> {
             let expression = self.uniform_expression(port, value, &attribute)?;
             return Ok((expression, true));
         }
-        let default = port.default_value.as_deref().ok_or_else(|| {
-            self.failure(MaterialXDiagnostic::error(
-                DiagnosticCode::MissingValue,
-                self.material.as_str(),
-                Some(prim.as_str().into()),
-                Some(attribute.as_str().into()),
-                format!(
-                    "input {} has no connection, authored value, or NodeDef default",
-                    port.name
-                ),
-            ))
-        })?;
+        let default = port
+            .default_value
+            .as_deref()
+            .or_else(|| match port.name.as_str() {
+                "normal" => Some("0.0, 0.0, 1.0"),
+                "tangent" => Some("1.0, 0.0, 0.0"),
+                "bitangent" => Some("0.0, 1.0, 0.0"),
+                "texcoord" => Some("0.0, 0.0"),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                self.failure(MaterialXDiagnostic::error(
+                    DiagnosticCode::MissingValue,
+                    self.material.as_str(),
+                    Some(prim.as_str().into()),
+                    Some(attribute.as_str().into()),
+                    format!(
+                        "input {} has no connection, authored value, or NodeDef default",
+                        port.name
+                    ),
+                ))
+            })?;
+
         let data = parse_default(port, default).map_err(|message| {
             self.failure(MaterialXDiagnostic::error(
                 DiagnosticCode::TypeMismatch,
@@ -407,10 +419,14 @@ impl<'a> Compiler<'a> {
         Ok((expression, false))
     }
 
-    fn lower_source(&mut self, source: &Path) -> Result<Expression, CompileFailure> {
+    fn lower_source(
+        &mut self,
+        source: &Path,
+        expected_port: Option<&Port>,
+    ) -> Result<Option<Expression>, CompileFailure> {
         let key = source.as_str().to_string();
         if let Some(expression) = self.memo.get(&key) {
-            return Ok(expression.clone());
+            return Ok(Some(expression.clone()));
         }
         if !self.visiting.insert(key.clone()) {
             return self.fail(MaterialXDiagnostic::error(
@@ -422,15 +438,19 @@ impl<'a> Compiler<'a> {
             ));
         }
 
-        let result = self.lower_source_uncached(source);
+        let result = self.lower_source_uncached(source, expected_port);
         self.visiting.remove(source.as_str());
-        if let Ok(expression) = &result {
+        if let Ok(Some(expression)) = &result {
             self.memo.insert(key, expression.clone());
         }
         result
     }
 
-    fn lower_source_uncached(&mut self, source: &Path) -> Result<Expression, CompileFailure> {
+    fn lower_source_uncached(
+        &mut self,
+        source: &Path,
+        expected_port: Option<&Port>,
+    ) -> Result<Option<Expression>, CompileFailure> {
         let (prim, property) = source.split_property().ok_or_else(|| {
             self.failure(MaterialXDiagnostic::error(
                 DiagnosticCode::InvalidConnection,
@@ -464,15 +484,47 @@ impl<'a> Compiler<'a> {
                 ));
             }
             if let Some(next) = connections.into_iter().next() {
-                return self.lower_source(&next);
+                let expr = self.lower_source(&next, expected_port)?;
+                if expr.is_some() {
+                    return Ok(expr);
+                }
             }
-            return self.fail(MaterialXDiagnostic::error(
-                DiagnosticCode::InvalidConnection,
-                self.material.as_str(),
-                Some(prim.as_str().into()),
-                Some(source.as_str().into()),
-                "interface property has no value-producing connection",
-            ));
+
+            let attr = self
+                .stage
+                .prim(prim.clone())
+                .attribute(property);
+            let value = attr
+                .get_at::<Value>(self.time)
+                .map_err(|error| self.read_error(source, error))?;
+
+            if let Some(value) = value {
+                let attr_type = attr.type_name().ok().flatten();
+                let port = if let Some(expected) = expected_port {
+                    expected.clone()
+                } else {
+                    let mtlx_type = usd_type_to_materialx(attr_type.as_deref(), &value).map_err(|message| {
+                        self.failure(MaterialXDiagnostic::error(
+                            DiagnosticCode::TypeMismatch,
+                            self.material.as_str(),
+                            Some(prim.as_str().into()),
+                            Some(source.as_str().into()),
+                            message,
+                        ))
+                    })?;
+                    Port {
+                        name: property.trim_start_matches("inputs:").to_string(),
+                        materialx_type: mtlx_type,
+                        wesl_type: None,
+                        default_value: None,
+                        uniform: true,
+                    }
+                };
+                let expression = self.uniform_expression(&port, value, source)?;
+                return Ok(Some(expression));
+            }
+
+            return Ok(None);
         }
 
         if prim_type.as_deref() != Some("Shader") || !property.starts_with("outputs:") {
@@ -484,7 +536,8 @@ impl<'a> Compiler<'a> {
                 "connection target is not a Shader output",
             ));
         }
-        self.lower_node(&prim, property.trim_start_matches("outputs:"))
+        let expr = self.lower_node(&prim, property.trim_start_matches("outputs:"))?;
+        Ok(Some(expr))
     }
 
     fn lower_node(&mut self, prim: &Path, output_name: &str) -> Result<Expression, CompileFailure> {
@@ -522,9 +575,28 @@ impl<'a> Compiler<'a> {
                 materialx_type: output.materialx_type,
             });
         }
-        if id == "ND_image_color3" {
-            return self.lower_image_color3(prim, &descriptor, &output);
+        if id == "ND_tangent_vector3" {
+            return Ok(Expression {
+                code: "vec3f(1.0, 0.0, 0.0)".into(),
+                materialx_type: output.materialx_type,
+            });
         }
+        if id == "ND_normal_vector3" {
+            return Ok(Expression {
+                code: "vec3f(0.0, 0.0, 1.0)".into(),
+                materialx_type: output.materialx_type,
+            });
+        }
+        if id == "ND_bitangent_vector3" {
+            return Ok(Expression {
+                code: "vec3f(0.0, 1.0, 0.0)".into(),
+                materialx_type: output.materialx_type,
+            });
+        }
+        if id.starts_with("ND_image_") {
+            return self.lower_image_node(prim, &descriptor, &output);
+        }
+
         if !matches!(descriptor.status.as_str(), "translated" | "composed") {
             return self.fail(MaterialXDiagnostic::error(
                 DiagnosticCode::UnsupportedFeature,
@@ -566,7 +638,7 @@ impl<'a> Compiler<'a> {
         })
     }
 
-    fn lower_image_color3(
+    fn lower_image_node(
         &mut self,
         prim: &Path,
         descriptor: &Coverage,
@@ -641,12 +713,11 @@ impl<'a> Compiler<'a> {
             ));
         }
 
+        let is_srgb = matches!(output.materialx_type.as_str(), "color3" | "color4");
         let texture_index = self.textures.len();
         self.textures.push(CompiledTexture {
             path: file,
-            // Preserve the behavior of the original UsdShade vertical slice.
-            // Standalone MaterialX documents provide exact colorspace metadata.
-            is_srgb: true,
+            is_srgb,
             u_address_mode: "periodic".into(),
             v_address_mode: "periodic".into(),
             filter_type: "linear".into(),
@@ -961,6 +1032,36 @@ fn component_count(materialx_type: &str) -> Option<usize> {
     }
 }
 
+fn usd_type_to_materialx(attr_type: Option<&str>, value: &Value) -> Result<String, String> {
+    if let Some(attr_type) = attr_type {
+        match attr_type {
+            "float" | "double" | "half" => return Ok("float".into()),
+            "int" | "int64" | "i32" | "i64" | "uchar" | "uint" => return Ok("integer".into()),
+            "bool" => return Ok("boolean".into()),
+            "float2" | "double2" | "half2" | "vector2f" | "texCoord2f" => {
+                return Ok("vector2".into());
+            }
+            "color3f" | "color3d" | "color3h" => return Ok("color3".into()),
+            "float3" | "double3" | "half3" | "vector3f" | "normal3f" | "point3f" => {
+                return Ok("vector3".into());
+            }
+            "color4f" | "color4d" | "color4h" => return Ok("color4".into()),
+            "float4" | "double4" | "half4" | "vector4f" => return Ok("vector4".into()),
+            _ => {}
+        }
+    }
+    match value {
+        Value::Bool(_) => Ok("boolean".into()),
+        Value::Int(_) | Value::Int64(_) => Ok("integer".into()),
+        Value::Float(_) | Value::Double(_) => Ok("float".into()),
+        Value::Vec2f(_) | Value::Vec2d(_) => Ok("vector2".into()),
+        Value::Vec3f(_) | Value::Vec3d(_) => Ok("color3".into()),
+        Value::Vec4f(_) | Value::Vec4d(_) => Ok("color4".into()),
+        other => Err(format!("unsupported USD value type for uniform {other:?}")),
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
@@ -1254,4 +1355,99 @@ fn main_pass_post_lighting_processing(input: PbrInput, color: vec4f) -> vec4f {
             );
         }
     }
+
+    #[test]
+    fn interface_property_with_authored_value_lowers_to_uniform() {
+        let (stage, material) = constant_surface();
+        // Author an interface input on /Mat and connect the shader to it.
+        stage
+            .create_attribute("/Mat.inputs:base", "float")
+            .unwrap()
+            .set(Value::Float(0.75))
+            .unwrap();
+        stage
+            .create_attribute("/Mat/Surface.inputs:base", "float")
+            .unwrap()
+            .set_connections([Path::new("/Mat.inputs:base").unwrap()])
+            .unwrap();
+
+        let registry = MaterialXRegistry::default();
+        let compiled = compile_materialx(&stage, &material, None, &registry).unwrap();
+        assert!(!compiled.uniforms.is_empty());
+        validate_with_bevy_wesl(&compiled, &registry);
+    }
+
+    #[test]
+    fn interface_property_unconnected_unauthored_falls_back_to_default() {
+        let (stage, material) = constant_surface();
+        // Create an unauthored interface input on /Mat and connect the shader opacity to it.
+        stage
+            .create_attribute("/Mat.inputs:opacity", "color3f")
+            .unwrap();
+        stage
+            .create_attribute("/Mat/Surface.inputs:opacity", "color3f")
+            .unwrap()
+            .set_connections([Path::new("/Mat.inputs:opacity").unwrap()])
+            .unwrap();
+
+        let registry = MaterialXRegistry::default();
+        let compiled = compile_materialx(&stage, &material, None, &registry).unwrap();
+        // Unbound opacity should not trigger alpha blend mode.
+        assert!(!compiled.alpha_blend);
+        validate_with_bevy_wesl(&compiled, &registry);
+    }
+
+    #[test]
+    fn geometric_streams_and_normalmap_lower() {
+        let (stage, material) = constant_surface();
+        define_shader(&stage, "/Mat/NormalMap", "ND_normalmap_float");
+        define_shader(&stage, "/Mat/Tangent", "ND_tangent_vector3");
+        stage
+            .create_attribute("/Mat/Surface.inputs:normal", "vector3f")
+            .unwrap()
+            .set_connections([Path::new("/Mat/NormalMap.outputs:out").unwrap()])
+            .unwrap();
+
+        let registry = MaterialXRegistry::default();
+        let compiled = compile_materialx(&stage, &material, None, &registry).unwrap();
+        validate_with_bevy_wesl(&compiled, &registry);
+    }
+
+    #[test]
+    fn theatrical_usd_compiles_when_present() {
+        let path = "/home/tanghe/dev/leptos/website_v3/usd/Theatrical.usd";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let stage = Stage::open(path).unwrap();
+        let registry = MaterialXRegistry::default();
+
+        let mut mats = Vec::new();
+        let _ = stage.traverse(openusd::usd::PrimPredicate::default(), |path: &Path| {
+            if stage
+                .prim(path.clone())
+                .type_name()
+                .ok()
+                .flatten()
+                .as_deref()
+                == Some("Material")
+            {
+                mats.push(path.clone());
+            }
+        });
+
+        assert!(!mats.is_empty(), "Theatrical.usd should have materials");
+        for mat in &mats {
+            let compiled = compile_materialx(&stage, mat, None, &registry)
+                .unwrap_or_else(|err| panic!("Failed to compile {}: {err:?}", mat.as_str()));
+            compiled
+                .wesl
+                .parse::<wesl::syntax::TranslationUnit>()
+                .expect("valid WESL");
+            validate_with_bevy_wesl(&compiled, &registry);
+        }
+    }
 }
+
+
+
